@@ -11,7 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var (
+const (
 	// DefaultBlockSize defines how many tokens each block contains in the prefix cache.
 	DefaultBlockSize = 4
 	// DefaultMaxBlockNumber sets the maximum number of blocks the LRU cache can store.
@@ -25,6 +25,7 @@ type Config struct {
 }
 
 // PrefixHashTable is an in-memory prefix-to-block cache with xxhash keys and LRU eviction.
+// TODO: see if can use
 type PrefixHashTable struct {
 	mu        sync.RWMutex
 	seed      uint64
@@ -113,7 +114,7 @@ func (c *PrefixHashTable) getPrefixBlocks(prefixHashes []uint64) map[uint64]Bloc
 
 // getPrefixHashes is the internal implementation for computing block hashes from prompt.
 func (c *PrefixHashTable) getPrefixHashes(prompt []string) []uint64 {
-	digest := xxhash.NewWithSeed(c.seed)
+	digest := xxhash.New()
 	var hashes []uint64
 
 	for i := 0; i < len(prompt); i += c.blockSize {
@@ -121,7 +122,7 @@ func (c *PrefixHashTable) getPrefixHashes(prompt []string) []uint64 {
 		if end > len(prompt) {
 			end = len(prompt)
 		}
-		digest.ResetWithSeed(c.seed)
+		digest.Reset()
 		for j := i; j < end; j++ {
 			pBytes := []byte(prompt[j])
 			_, err := digest.Write(pBytes)

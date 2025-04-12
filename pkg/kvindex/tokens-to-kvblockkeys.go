@@ -6,22 +6,18 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"github.com/neuralmagic/distributed-kv-cache/pkg/utils"
 )
 
-// TokenDatabase defines the interface for token processing.
-type TokenDatabase interface {
-	ProcessTokens(tokens []uint32) ([]ProcessedChunk, error)
+// TokenProcessor defines the interface for converting tokens to
+// KVBlockKeys.
+type TokenProcessor interface {
+	// TokensToKVBlockKeys converts tokens into KVBlockKeys.
+	TokensToKVBlockKeys(tokens []uint32, modelName string) []KVBlockKey
 }
 
-// ProcessedChunk represents one tuple result: the start and end indices and the CacheEngineKey.
-type ProcessedChunk struct {
-	Start int
-	End   int
-	Key   CacheEngineKey
-}
-
-// CacheEngineKey is equivalent to the LMCacheEngineKey in the Python code.
-type CacheEngineKey struct {
+// KVBlockKey is equivalent to the LMCacheEngineKey in the Python code.
+type KVBlockKey struct {
 	Fmt       string
 	ModelName string
 	WorldSize int
@@ -30,7 +26,7 @@ type CacheEngineKey struct {
 }
 
 // String returns a string representation of the CacheEngineKey.
-func (c CacheEngineKey) String() string {
+func (c KVBlockKey) String() string {
 	/*
 	   def to_string(self):
 	       return f"{self.fmt}@{self.model_name}@{self.world_size}"\
@@ -48,7 +44,6 @@ type LMCacheEngineConfig struct {
 // LMCacheEngineMetadata holds metadata used to populate the cache key.
 type LMCacheEngineMetadata struct {
 	Fmt       string
-	ModelName string
 	WorldSize int
 	WorkerID  int
 }
@@ -61,7 +56,7 @@ type ChunkedTokenDatabase struct {
 }
 
 // NewChunkedTokenDatabase creates a new instance with the given config and metadata.
-func NewChunkedTokenDatabase(config LMCacheEngineConfig, metadata LMCacheEngineMetadata) TokenDatabase {
+func NewChunkedTokenDatabase(config LMCacheEngineConfig, metadata LMCacheEngineMetadata) TokenProcessor {
 	return &ChunkedTokenDatabase{
 		chunkSize: config.ChunkSize,
 		metadata:  metadata,
@@ -118,37 +113,18 @@ func (db *ChunkedTokenDatabase) prefixHashes(tokenChunks [][]uint32) []string {
 	return hashes
 }
 
-// makeKeyByHash creates a CacheEngineKey given the chunk hash.
-func (db *ChunkedTokenDatabase) makeKeyByHash(chunkHash string) CacheEngineKey {
-	return CacheEngineKey{
-		Fmt:       db.metadata.Fmt,
-		ModelName: db.metadata.ModelName,
-		WorldSize: db.metadata.WorldSize,
-		WorkerID:  db.metadata.WorkerID,
-		ChunkHash: chunkHash,
-	}
-}
-
-// ProcessTokens processes a slice of tokens by chunking them,
-// updating a rolling hash for every chunk, and building a CacheEngineKey for each.
-// It returns a slice of ProcessedChunk with start/end indices and key.
-func (db *ChunkedTokenDatabase) ProcessTokens(tokens []uint32) ([]ProcessedChunk, error) {
-	totalLen := len(tokens)
+// TokensToKVBlockKeys converts tokens into KVBlockKeys.
+func (db *ChunkedTokenDatabase) TokensToKVBlockKeys(tokens []uint32, modelName string) []KVBlockKey {
 	tokenChunks := db.chunkTokens(tokens)
 	prefixHashes := db.prefixHashes(tokenChunks)
-	var results []ProcessedChunk
 
-	for i, hashVal := range prefixHashes {
-		startIdx := i * db.chunkSize
-		endIdx := startIdx + db.chunkSize
-		if endIdx > totalLen {
-			endIdx = totalLen
+	return utils.SliceMap(prefixHashes, func(hashVal string) KVBlockKey {
+		return KVBlockKey{
+			Fmt:       db.metadata.Fmt,
+			ModelName: modelName,
+			WorldSize: db.metadata.WorldSize,
+			WorkerID:  db.metadata.WorkerID,
+			ChunkHash: hashVal,
 		}
-		results = append(results, ProcessedChunk{
-			Start: startIdx,
-			End:   endIdx,
-			Key:   db.makeKeyByHash(hashVal),
-		})
-	}
-	return results, nil
+	})
 }

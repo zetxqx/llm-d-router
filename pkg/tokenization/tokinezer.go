@@ -1,7 +1,6 @@
 package tokenization
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/daulet/tokenizers"
@@ -9,8 +8,8 @@ import (
 
 // Tokenizer interface defines the methods for tokenization.
 type Tokenizer interface {
-	// Encode converts a string into token IDs.
-	Encode(input, modelName string) ([]uint32, error)
+	// Encode tokenizes the input string and returns the token IDs and offsets.
+	Encode(input, modelName string) ([]uint32, []tokenizers.Offset, error)
 }
 
 // HFTokenizer is a struct that implements the Tokenizer interface using
@@ -28,19 +27,24 @@ func NewHFTokenizer() Tokenizer {
 }
 
 // Encode converts a string into token IDs.
-func (t *HFTokenizer) Encode(input, modelName string) ([]uint32, error) {
+func (t *HFTokenizer) Encode(input, modelName string) ([]uint32, []tokenizers.Offset, error) {
 	tk, err := tokenizers.FromPretrained(modelName, t.cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	defer func(tk *tokenizers.Tokenizer) {
 		err := tk.Close()
 		if err != nil {
-			fmt.Println("Error closing tokenizer:", err)
+			return
 		}
 	}(tk)
 
-	ids, _ := tk.Encode(input, true)
-	return ids, nil
+	encodeOptions := []tokenizers.EncodeOption{
+		tokenizers.WithReturnTypeIDs(),
+		tokenizers.WithReturnOffsets(),
+	}
+
+	resp := tk.EncodeWithOptions(input, true, encodeOptions...)
+	return resp.IDs, resp.Offsets, nil
 }

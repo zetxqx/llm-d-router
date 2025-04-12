@@ -2,8 +2,6 @@ package tokenization
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"sync"
 
 	"k8s.io/client-go/util/workqueue"
@@ -19,21 +17,25 @@ type Task struct {
 type Pool struct {
 	workers int
 	queue   workqueue.TypedRateLimitingInterface[Task]
-	indexer TokenIndexer
 	wg      sync.WaitGroup
+
+	indexer   Indexer
+	tokenizer Tokenizer // TODO: replace with map of active tokenizers
 }
 
 // NewTokenizationPool initializes a TokenizationPool with the specified number
-// of workers and the provided TokenIndexer.
-func NewTokenizationPool(workers int, indexer TokenIndexer) *Pool {
+// of workers and the provided Indexer.
+func NewTokenizationPool(workers int, store Indexer) *Pool {
 	return &Pool{
-		workers: workers,
-		queue:   workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[Task]()),
-		indexer: indexer,
+		workers:   workers,
+		queue:     workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[Task]()),
+		indexer:   store,
+		tokenizer: NewHFTokenizer(),
 	}
 }
 
 // AddTask enqueues a new tokenization task.
+// This method only enqueues the task and does not start processing it.
 func (pool *Pool) AddTask(prompt, modelName string) {
 	task := Task{
 		Prompt:    prompt,
@@ -49,10 +51,9 @@ func (pool *Pool) Run(ctx context.Context) {
 		pool.wg.Add(1)
 		go pool.workerLoop(i)
 	}
-	// Wait for context cancellation.
+
 	<-ctx.Done()
 
-	// Shutdown the queue (which causes Get() to return shutdown=true).
 	pool.queue.ShutDown()
 	pool.wg.Wait()
 }
@@ -67,10 +68,9 @@ func (pool *Pool) workerLoop(workerID int) {
 		}
 
 		// Process the task.
-		if err := pool.processTask(&task); err == nil {
+		if err := pool.processTask(task); err == nil {
 			pool.queue.Forget(task)
 		} else {
-			// In case of error, requeue with rate limiting.
 			pool.queue.AddRateLimited(task)
 		}
 		pool.queue.Done(task)
@@ -79,26 +79,13 @@ func (pool *Pool) workerLoop(workerID int) {
 
 // processTask tokenizes the prompt, extracts a prefix, and updates the
 // indexer.
-func (pool *Pool) processTask(task *Task) error {
-	// For demonstration purposes, we split the prompt by whitespace.
-	tokens := tokenize(task.Prompt)
-	tokenCount := len(tokens)
-
-	// Use the first token as the prefix. If no token exists, set prefix to empty.
-	prefix := ""
-	if tokenCount > 0 {
-		prefix = tokens[0]
+func (pool *Pool) processTask(task Task) error {
+	tokenIds, offsets, err := pool.tokenizer.Encode(task.Prompt, task.ModelName)
+	if err != nil {
+		return err
 	}
 
-	// Update the indexer with the computed token count for the prefix.
-	pool.indexer.Update(prefix, tokenCount)
+	pool.indexer.AddFullTokenization(task.ModelName, task.Prompt, tokenIds, offsets)
 
-	// Print a message for demonstration.
-	fmt.Printf("Worker processed task for model '%s': prefix='%s', tokens=%d\n", task.ModelName, prefix, tokenCount)
 	return nil
-}
-
-// tokenize is a simple helper function to split a string into tokens.
-func tokenize(s string) []string {
-	return strings.Fields(s)
 }

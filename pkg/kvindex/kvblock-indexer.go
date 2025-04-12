@@ -1,7 +1,6 @@
-package kvblock_indexer
+package kvindex
 
 import (
-	"github.com/neuralmagic/distributed-kv-cache/pkg/kvindex"
 	"github.com/neuralmagic/distributed-kv-cache/pkg/utils"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/net/context"
@@ -12,9 +11,9 @@ import (
 // KVBlockIndexer defines the interactions with the KVCache indexing backend.
 type KVBlockIndexer interface {
 	// GetPodsForKeys retrieves the pods for the given keys.
-	// It returns a map where the keys are CacheEngineKey and the values are slices of pod names.
+	// It returns a map where the keys are KVBlockKey and the values are slices of pod names.
 	GetPodsForKeys(ctx context.Context,
-		keys []kvindex.CacheEngineKey) (map[kvindex.CacheEngineKey][]string, error)
+		keys []KVBlockKey) ([]string, map[string]string, error)
 }
 
 type RedisKVBlockIndexer struct {
@@ -22,8 +21,8 @@ type RedisKVBlockIndexer struct {
 	RedisClient *redis.Client
 }
 
-// NewRedisKVCacheIndexer creates a new RedisKVBlockIndexer instance.
-func NewRedisKVCacheIndexer(redisClient *redis.Client) *RedisKVBlockIndexer {
+// NewRedisKVBlockIndexer creates a new RedisKVBlockIndexer instance.
+func NewRedisKVBlockIndexer(redisClient *redis.Client) *RedisKVBlockIndexer {
 	return &RedisKVBlockIndexer{
 		RedisClient: redisClient,
 	}
@@ -31,16 +30,16 @@ func NewRedisKVCacheIndexer(redisClient *redis.Client) *RedisKVBlockIndexer {
 
 // GetPodsForKeys retrieves the pods for the given keys.
 func (r *RedisKVBlockIndexer) GetPodsForKeys(ctx context.Context,
-	keys []kvindex.CacheEngineKey) (map[kvindex.CacheEngineKey][]string, error) {
-	pods := make(map[kvindex.CacheEngineKey][]string)
+	keys []KVBlockKey) ([]string, map[string]string, error) {
+	pods := make(map[string]string)
 
-	redisKeys := utils.SliceMap(keys, func(key kvindex.CacheEngineKey) string {
+	redisKeys := utils.SliceMap(keys, func(key KVBlockKey) string {
 		return key.String()
 	})
 	// use redis.MGet to get all keys at once
 	values, err := r.RedisClient.MGet(ctx, redisKeys...).Result()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	for i, value := range values { // values are "podIP:port", we only need podIP
@@ -58,8 +57,8 @@ func (r *RedisKVBlockIndexer) GetPodsForKeys(ctx context.Context,
 			continue
 		}
 
-		pods[keys[i]] = append(pods[keys[i]], parts[0])
+		pods[redisKeys[i]] = parts[0]
 	}
 
-	return pods, nil
+	return redisKeys, pods, nil
 }
