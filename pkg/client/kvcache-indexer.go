@@ -67,19 +67,21 @@ func (k *KVCacheIndexer) Run(ctx context.Context) {
 
 func (k *KVCacheIndexer) GetPodScores(ctx context.Context, prompt, modelName string) ([]PodScore, error) {
 	logger := klog.FromContext(ctx).WithName("kvcache-indexer")
-	/*// 0. add to tokenizers pool
+	// 0. add to tokenizers pool
 	k.tokenizersPool.AddTask(prompt, modelName)
 
 	// 1. get available tokens of longest prefix
 	tokens := k.tokensIndexer.FindLongestContainedTokens(prompt, modelName)
 	if len(tokens) == 0 {
 		return nil, nil
-	}*/
-
-	tokens, _, err := tokenization.NewHFTokenizer().Encode(prompt, modelName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode prompt: %w", err)
 	}
+
+	/*
+		tokens, _, err := tokenization.NewHFTokenizer().Encode(prompt, modelName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode prompt: %w", err)
+		}
+	*/
 
 	// 2. get block keys
 	blockKeys := k.tokensProcessor.TokensToKVBlockKeys(tokens, modelName)

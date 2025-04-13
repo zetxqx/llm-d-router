@@ -117,19 +117,20 @@ func newContainedTokenTrie(modelName string) *containedTokenTrie {
 // Assumes the caller holds the Write Lock.
 func (t *containedTokenTrie) addFullTokenization(text string, tokens []uint32, offsets []tokenizers.Offset) {
 	node := t.root
-	lastFoundK := -1
-
-	// Pre-check: Handle potential leading special token ([CLS]) if its offset is [0,0]
-	// This ensures the root's immediate children might inherit this if applicable.
-	if len(offsets) > 0 && offsets[0][0] == 0 && offsets[0][1] == 0 {
+	var lastFoundK int
+	if len(tokens) > 0 {
+		t.root.lastContainedTokenIndex = 0
+		t.root.lastContainedTokenID = tokens[0]
 		lastFoundK = 0
+	} else {
+		lastFoundK = -1
 	}
 
 	for i, char := range text {
-		charEndPos := uint(i + 1) // The character position *after* including the current char
+		charEndPos := uint(i + 1)
 
 		// Find the largest token index 'k' such that offsets[k][1] <= charEndPos
-		// We can continue searching forward from the previously found k.
+		// We can continue searching forward from the previously found k
 		currentBestK := lastFoundK
 		searchStart := 0
 		if lastFoundK != -1 {
@@ -145,7 +146,7 @@ func (t *containedTokenTrie) addFullTokenization(text string, tokens []uint32, o
 				break
 			}
 		}
-		lastFoundK = currentBestK // Update the overall last found k for the next iteration
+		lastFoundK = currentBestK
 
 		// Traverse or create the node for the current character
 		child, ok := node.children[char]
@@ -153,7 +154,7 @@ func (t *containedTokenTrie) addFullTokenization(text string, tokens []uint32, o
 			child = newContainedTokenNode()
 			node.children[char] = child
 		}
-		node = child // Move to the child node
+		node = child
 
 		// Store the determined token info at this node
 		if lastFoundK != -1 {
@@ -173,7 +174,7 @@ func (t *containedTokenTrie) FindLongestContainedTokens(prompt string) []uint32 
 	defer t.mu.RUnlock()
 
 	containedTokens := []uint32{}
-	lastTokenIdxSeen := -1 // Track the index to avoid adding duplicates from parent nodes
+	lastTokenIdxSeen := -1
 	node := t.root
 
 	// Handle potential token associated with the root (e.g., leading CLS)
