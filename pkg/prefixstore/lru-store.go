@@ -31,6 +31,7 @@ type Block struct {
 
 // LRUTokenStore is an in-memory prefix-to-block cache with xxhash keys and LRU
 // eviction.
+// TODO: optimize implementation and check chunk-tokenization vs tokenization-chunking.
 type LRUTokenStore struct {
 	mu sync.RWMutex
 
