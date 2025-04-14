@@ -105,7 +105,7 @@ func (k *Indexer) GetPodScores(ctx context.Context, prompt, modelName string,
 	logger.Info("made block keys", "blockKeys", blockKeys)
 
 	// 3. query kvblock indexer for pods
-	strBlockKeys, keyToPods, err := k.kvBlockIndexer.GetPodsForKeys(ctx, blockKeys, sets.New[string](podIdentifiers...))
+	strBlockKeys, keyToPods, err := k.kvBlockIndexer.GetPodsForKeys(ctx, blockKeys, sets.New(podIdentifiers...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query kvblock indexer: %w", err)
 	}

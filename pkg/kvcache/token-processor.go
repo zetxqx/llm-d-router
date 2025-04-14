@@ -13,6 +13,8 @@ import (
 	"github.com/neuralmagic/distributed-kv-cache/pkg/utils"
 )
 
+const defaultChunkSize = 256
+
 // TokenProcessorConfig holds the configuration for the token processor.
 type TokenProcessorConfig struct {
 	ChunkSize int
@@ -22,7 +24,7 @@ type TokenProcessorConfig struct {
 // DefaultTokenProcessorConfig returns the default configuration for the token processor.
 func DefaultTokenProcessorConfig() *TokenProcessorConfig {
 	return &TokenProcessorConfig{
-		ChunkSize: 256,
+		ChunkSize: defaultChunkSize,
 		TemporaryTokenProcessorConfig: &TemporaryTokenProcessorConfig{
 			Fmt:       "vllm",
 			WorldSize: 1,
