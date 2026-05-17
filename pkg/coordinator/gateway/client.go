@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+
 	"github.com/llm-d/coordinator/pkg/config"
-	"github.com/llm-d/coordinator/pkg/logging"
 )
 
 // Client is an HTTP client configured for persistent connections to the Envoy Gateway.
@@ -59,9 +62,9 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 		req.Header.Set(k, v)
 	}
 
-	logger := logging.FromContext(ctx).WithName("gateway")
+	logger := log.FromContext(ctx).WithName("gateway")
 	if body != nil {
-		logger.V(logging.TRACE).Info("request body", "method", method, "path", path, "body", redactBody(body))
+		logger.V(logutil.TRACE).Info("request body", "method", method, "path", path, "body", redactBody(body))
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -74,7 +77,7 @@ func (c *Client) Request(ctx context.Context, method, path string, body []byte, 
 	if err != nil {
 		return nil, fmt.Errorf("reading response from gateway: %w", err)
 	}
-	logger.V(logging.TRACE).Info("response body", "status", resp.StatusCode, "body", redactBody(respBody))
+	logger.V(logutil.TRACE).Info("response body", "status", resp.StatusCode, "body", redactBody(respBody))
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
 	return resp, nil

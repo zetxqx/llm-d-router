@@ -7,15 +7,21 @@ import (
 	"io"
 	"net/http"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
+
 	"github.com/llm-d/coordinator/pkg/connectors/kv"
 	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
 )
 
+const DecodeStepName = "decode"
+
 func init() {
-	pipeline.Register("decode", NewDecodeStep)
+	pipeline.Register(DecodeStepName, NewDecodeStep)
 }
 
 type DecodeStep struct {
@@ -42,10 +48,10 @@ func (s *DecodeStep) SetGatewayClient(c *gateway.Client) {
 	s.gwClient = c
 }
 
-func (s *DecodeStep) Name() string { return "decode" }
+func (s *DecodeStep) Name() string { return DecodeStepName }
 
 func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := logging.FromContext(ctx).WithName("decode")
+	logger := log.FromContext(ctx).WithName("decode")
 	reqCtx.Body["kv_transfer_params"] = s.kv.PrepareDecodeKVParams(reqCtx)
 	s.injectUUIDs(reqCtx)
 
@@ -55,10 +61,10 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 
 	path := fmt.Sprintf("%s%s", gateway.DecodePrefix, reqCtx.OriginalPath)
-	logger.V(logging.DEFAULT).Info("sending request", "path", path, "stream", reqCtx.Stream)
+	logger.V(logutil.DEFAULT).Info("sending request", "path", path, "stream", reqCtx.Stream)
 
 	resp, err := s.gwClient.Post(ctx, path, bodyBytes, map[string]string{
-		"X-Request-ID": reqCtx.RequestID,
+		reqcommon.RequestIDHeaderKey: reqCtx.RequestID,
 	})
 	if err != nil {
 		return fmt.Errorf("decode: request: %w", err)

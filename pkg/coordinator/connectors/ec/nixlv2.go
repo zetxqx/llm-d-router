@@ -1,7 +1,7 @@
 package ec
 
 import (
-	"github.com/llm-d/coordinator/pkg/logging"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -18,7 +18,7 @@ func (nixlV2) MergeEncodeResponse(reqCtx *pipeline.RequestContext, encResp map[s
 		return
 	}
 	reqCtx.ECTransferParams = append(reqCtx.ECTransferParams, encResp)
-	logger.V(logging.TRACE).Info("merged encode response", "total", len(reqCtx.ECTransferParams))
+	logger.V(logutil.TRACE).Info("merged encode response", "total", len(reqCtx.ECTransferParams))
 }
 
 func (nixlV2) PreparePrefillECParams(reqCtx *pipeline.RequestContext) map[string]any {
@@ -26,6 +26,6 @@ func (nixlV2) PreparePrefillECParams(reqCtx *pipeline.RequestContext) map[string
 		return nil
 	}
 	params := map[string]any{"image": reqCtx.ECTransferParams}
-	logger.V(logging.TRACE).Info("preparing prefill ec params", "images", len(reqCtx.ECTransferParams))
+	logger.V(logutil.TRACE).Info("preparing prefill ec params", "images", len(reqCtx.ECTransferParams))
 	return params
 }

@@ -10,7 +10,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/llm-d/coordinator/pkg/logging"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -41,13 +41,13 @@ func Build(name string) (Connector, error) {
 	}
 	switch name {
 	case NIXLv2:
-		logger.V(logging.DEFAULT).Info("using connector", "name", name)
+		logger.V(logutil.DEFAULT).Info("using connector", "name", name)
 		return nixlV2{}, nil
 	case SharedStorage:
-		logger.V(logging.DEFAULT).Info("using connector", "name", name)
+		logger.V(logutil.DEFAULT).Info("using connector", "name", name)
 		return sharedStorage{}, nil
 	case SGLang:
-		logger.V(logging.DEFAULT).Info("using connector", "name", name)
+		logger.V(logutil.DEFAULT).Info("using connector", "name", name)
 		return sglangKV{}, nil
 	default:
 		return nil, fmt.Errorf("unknown connector: %q", name)

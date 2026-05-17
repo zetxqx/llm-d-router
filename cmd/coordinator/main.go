@@ -6,9 +6,10 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+
 	"github.com/llm-d/coordinator/pkg/config"
 	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"github.com/llm-d/coordinator/pkg/server"
 	"github.com/llm-d/coordinator/pkg/steps"
@@ -18,15 +19,14 @@ func main() {
 	configPath := flag.String("config", "configs/coordinator.yaml", "path to configuration file")
 	flag.Parse()
 
+	logutil.InitSetupLogging()
+	log := ctrl.Log.WithName("coordinator")
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		logging.InitLogging(logging.DEFAULT)
-		ctrl.Log.WithName("coordinator").Error(err, "failed to load config")
+		log.Error(err, "failed to load config")
 		os.Exit(1)
 	}
-
-	logging.InitLogging(logging.DEFAULT)
-	log := ctrl.Log.WithName("coordinator")
 
 	gwClient := gateway.New(cfg.Gateway)
 

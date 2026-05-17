@@ -8,12 +8,17 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/llm-d/coordinator/pkg/logging"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
+const RenderStepName = "render"
+
 func init() {
-	pipeline.Register("render", NewRenderStep)
+	pipeline.Register(RenderStepName, NewRenderStep)
 }
 
 type RenderStep struct {
@@ -45,10 +50,10 @@ func (s *RenderStep) SetServiceAddress(addr string) {
 	s.serviceAddress = addr
 }
 
-func (s *RenderStep) Name() string { return "render" }
+func (s *RenderStep) Name() string { return RenderStepName }
 
 func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := logging.FromContext(ctx).WithName("render")
+	logger := log.FromContext(ctx).WithName("render")
 
 	body, err := json.Marshal(reqCtx.Body)
 	if err != nil {
@@ -56,7 +61,7 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 
 	url := s.serviceAddress + s.endpoint
-	logger.V(logging.DEFAULT).Info("sending request", "url", url)
+	logger.V(logutil.DEFAULT).Info("sending request", "url", url)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
@@ -105,8 +110,8 @@ func (s *RenderStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		reqCtx.MultimodalEntries[i].Placeholder = imagePlaceholders[i]
 	}
 
-	logger.V(logging.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
-	logger.V(logging.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
+	logger.V(logutil.DEBUG).Info("response", "mm_hashes", imageHashes, "mm_placeholders", imagePlaceholders, "kwargs_data_len", len(imageKwargs))
+	logger.V(logutil.DEFAULT).Info("complete", "token_ids_len", len(renderResp.TokenIDs), "images", len(imageHashes))
 	return nil
 }
 

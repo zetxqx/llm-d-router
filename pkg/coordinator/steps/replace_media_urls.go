@@ -8,13 +8,18 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/llm-d/coordinator/pkg/logging"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"golang.org/x/sync/errgroup"
 )
 
+const ReplaceMediaURLsStepName = "replace-media-urls"
+
 func init() {
-	pipeline.Register("replace-media-urls", NewReplaceMediaURLsStep)
+	pipeline.Register(ReplaceMediaURLsStepName, NewReplaceMediaURLsStep)
 }
 
 type ReplaceMediaURLsStep struct {
@@ -47,10 +52,10 @@ func NewReplaceMediaURLsStep(params map[string]any) (pipeline.Step, error) {
 	}, nil
 }
 
-func (s *ReplaceMediaURLsStep) Name() string { return "replace-media-urls" }
+func (s *ReplaceMediaURLsStep) Name() string { return ReplaceMediaURLsStepName }
 
 func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
-	logger := logging.FromContext(ctx).WithName("replace-media-urls")
+	logger := log.FromContext(ctx).WithName("replace-media-urls")
 
 	messages, ok := reqCtx.Body["messages"].([]any)
 	if !ok {
@@ -95,7 +100,7 @@ func (s *ReplaceMediaURLsStep) Execute(ctx context.Context, reqCtx *pipeline.Req
 		return nil
 	}
 
-	logger.V(logging.TRACE).Info("downloading images", "count", len(imageURLs))
+	logger.V(logutil.TRACE).Info("downloading images", "count", len(imageURLs))
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxConcurrentDownloads)

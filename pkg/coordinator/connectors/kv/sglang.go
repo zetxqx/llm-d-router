@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
-	"github.com/llm-d/coordinator/pkg/logging"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -40,7 +40,7 @@ func (sglangKV) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]an
 		fieldBootstrapPort: sglangBootstrapPort,
 		fieldBootstrapRoom: uuid.NewString(),
 	}
-	logger.V(logging.TRACE).Info("preparing prefill kv params", "params", params)
+	logger.V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
 	return params
 }
 
@@ -49,6 +49,6 @@ func (sglangKV) PrepareDecodeKVParams(reqCtx *pipeline.RequestContext) map[strin
 	for k, v := range reqCtx.KVTransferParams {
 		out[k] = v
 	}
-	logger.V(logging.TRACE).Info("preparing decode kv params", "params", out)
+	logger.V(logutil.TRACE).Info("preparing decode kv params", "params", out)
 	return out
 }

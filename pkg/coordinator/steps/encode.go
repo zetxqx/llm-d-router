@@ -6,15 +6,21 @@ import (
 	"fmt"
 	"io"
 
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-inference-scheduler/pkg/common/request"
+
 	"github.com/llm-d/coordinator/pkg/connectors/ec"
 	"github.com/llm-d/coordinator/pkg/gateway"
-	"github.com/llm-d/coordinator/pkg/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 	"golang.org/x/sync/errgroup"
 )
 
+const EncodeStepName = "encode"
+
 func init() {
-	pipeline.Register("encode", NewEncodeStep)
+	pipeline.Register(EncodeStepName, NewEncodeStep)
 }
 
 type EncodeStep struct {
@@ -52,14 +58,14 @@ func (s *EncodeStep) SetGatewayClient(c *gateway.Client) {
 	s.gwClient = c
 }
 
-func (s *EncodeStep) Name() string { return "encode" }
+func (s *EncodeStep) Name() string { return EncodeStepName }
 
 func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContext) error {
 	if len(reqCtx.MultimodalEntries) == 0 {
 		return nil
 	}
 
-	logger := logging.FromContext(ctx).WithName("encode")
+	logger := log.FromContext(ctx).WithName("encode")
 
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(s.maxParallel)
@@ -86,10 +92,10 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 			}
 
 			path := fmt.Sprintf("%s%s", gateway.EncodePrefix, s.gatewayPath)
-			logger.V(logging.DEFAULT).Info("sending sub-request", "index", i, "path", path)
+			logger.V(logutil.DEFAULT).Info("sending sub-request", "index", i, "path", path)
 
 			resp, err := s.gwClient.Post(gCtx, path, bodyBytes, map[string]string{
-				"X-Request-ID": reqCtx.RequestID,
+				reqcommon.RequestIDHeaderKey: reqCtx.RequestID,
 			})
 			if err != nil {
 				return fmt.Errorf("encode[%d]: request: %w", i, err)
@@ -119,7 +125,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		s.ec.MergeEncodeResponse(reqCtx, r)
 	}
 
-	logger.V(logging.DEFAULT).Info("all sub-requests complete", "count", len(results))
+	logger.V(logutil.DEFAULT).Info("all sub-requests complete", "count", len(results))
 	return nil
 }
 

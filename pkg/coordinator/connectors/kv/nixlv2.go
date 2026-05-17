@@ -1,7 +1,7 @@
 package kv
 
 import (
-	"github.com/llm-d/coordinator/pkg/logging"
+	logutil "github.com/llm-d/llm-d-inference-scheduler/pkg/common/observability/logging"
 	"github.com/llm-d/coordinator/pkg/pipeline"
 )
 
@@ -22,7 +22,7 @@ func (nixlV2) PreparePrefillKVParams(_ *pipeline.RequestContext) map[string]any 
 		"remote_host":       nil,
 		"remote_port":       nil,
 	}
-	logger.V(logging.TRACE).Info("preparing prefill kv params", "params", params)
+	logger.V(logutil.TRACE).Info("preparing prefill kv params", "params", params)
 	return params
 }
 
@@ -32,6 +32,6 @@ func (nixlV2) PrepareDecodeKVParams(reqCtx *pipeline.RequestContext) map[string]
 		out[k] = v
 	}
 	out["do_remote_prefill"] = true
-	logger.V(logging.TRACE).Info("preparing decode kv params", "params", out)
+	logger.V(logutil.TRACE).Info("preparing decode kv params", "params", out)
 	return out
 }
