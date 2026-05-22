@@ -121,7 +121,12 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 		return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
 
 	default:
-		return &fwkrh.ParseResult{Skip: true}, nil
+		return &fwkrh.ParseResult{
+			Body: &fwkrh.InferenceRequestBody{
+				Payload: fwkrh.RawPayload(body),
+			},
+			Skip: true,
+		}, nil
 	}
 }
 
