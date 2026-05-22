@@ -48,6 +48,19 @@ func TestParseRequest(t *testing.T) {
 		t.Fatalf("Failed to create gRPC frame: %v", err)
 	}
 
+	streamRawPredictResponsesPayload := []byte(`{"input":"Hello from stream raw predict"}`)
+
+	streamRawPredictReqMsg := &aiplatformpb.StreamRawPredictRequest{
+		HttpBody: &httpbody.HttpBody{
+			Data: streamRawPredictResponsesPayload,
+		},
+	}
+
+	validStreamRawPredictBody, err := createGrpcFrame(streamRawPredictReqMsg)
+	if err != nil {
+		t.Fatalf("Failed to create gRPC frame: %v", err)
+	}
+
 	tests := []struct {
 		name       string
 		body       []byte
@@ -76,6 +89,23 @@ func TestParseRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "Success - StreamRawPredict",
+			body: validStreamRawPredictBody,
+			headers: map[string]string{
+				":path":        "/google.cloud.aiplatform.v1beta1.PredictionService/StreamRawPredict",
+				"content-type": "application/grpc",
+			},
+			wantResult: &fwkrh.ParseResult{
+				Body: &fwkrh.InferenceRequestBody{
+					Responses: &fwkrh.ResponsesRequest{
+						Input: "Hello from stream raw predict",
+					},
+					Payload: fwkrh.PayloadProto{Message: streamRawPredictReqMsg},
+				},
+				Skip: false,
+			},
+		},
+		{
 			name:    "Unsupported Path",
 			body:    []byte{},
 			headers: map[string]string{":path": "/unsupported/path", "content-type": "application/grpc"},
@@ -94,6 +124,12 @@ func TestParseRequest(t *testing.T) {
 			body:    []byte{0, 0, 0, 0, 1, 0xFF}, // Valid header, invalid payload
 			headers: map[string]string{":path": "/google.cloud.aiplatform.v1beta1.PredictionService/ChatCompletions", "content-type": "application/grpc"},
 			wantErr: "unmarshaling ChatCompletionsRequest",
+		},
+		{
+			name:    "Invalid proto message - StreamRawPredict",
+			body:    []byte{0, 0, 0, 0, 1, 0xFF}, // Valid header, invalid payload
+			headers: map[string]string{":path": "/google.cloud.aiplatform.v1beta1.PredictionService/StreamRawPredict", "content-type": "application/grpc"},
+			wantErr: "unmarshaling StreamRawPredictRequest",
 		},
 	}
 

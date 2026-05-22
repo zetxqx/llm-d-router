@@ -38,8 +38,10 @@ import (
 const (
 	VertexAIParserType = "vertexai-parser"
 
-	chatCompletionsMethod     = "PredictionService/ChatCompletions"
-	openAIChatCompletionsPath = "/chat/completions"
+	chatCompletionsMethod         = "PredictionService/ChatCompletions"
+	streamRawPredictServiceMethod = "PredictionService/StreamRawPredict"
+	openAIChatCompletionsPath     = "/chat/completions"
+	openAIResponsesPath           = "/responses"
 )
 
 // compile-time type validation
@@ -114,6 +116,36 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 		parseResult, err := p.openAIParser.ParseRequest(ctx, jsonBytes, headersCopy)
 		if err != nil {
 			return nil, fmt.Errorf("parsing ChatCompletionsRequest: %w", err)
+		}
+
+		inferenceRequestBody := parseResult.Body
+		inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
+		return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
+
+	case strings.HasSuffix(path, streamRawPredictServiceMethod):
+		parsedPayload, err := grpcutil.ParseGrpcPayload(body)
+		if err != nil {
+			return nil, fmt.Errorf("invalid or unsupported gRPC payload: %w", err)
+		}
+
+		req := &aiplatformpb.StreamRawPredictRequest{}
+		if err := proto.Unmarshal(parsedPayload, req); err != nil {
+			return nil, fmt.Errorf("unmarshaling StreamRawPredictRequest: %w", err)
+		}
+
+		httpBody := req.GetHttpBody()
+		if httpBody == nil {
+			return nil, errors.New("StreamRawPredictRequest has no HttpBody")
+		}
+		jsonBytes := httpBody.GetData()
+
+		// Use OpenAI parser to parse the JSON payload
+		// Clone headers and set path to /responses to make OpenAI parser recognize it
+		headersCopy := maps.Clone(headers)
+		headersCopy[parsers.MethodPathKey] = openAIResponsesPath
+		parseResult, err := p.openAIParser.ParseRequest(ctx, jsonBytes, headersCopy)
+		if err != nil {
+			return nil, fmt.Errorf("parsing StreamRawPredictRequest: %w", err)
 		}
 
 		inferenceRequestBody := parseResult.Body
