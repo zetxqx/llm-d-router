@@ -40,9 +40,11 @@ const (
 
 	// chatCompletionsMethod is the gRPC method path suffix for Vertex AI's OpenAI-compatible
 	// ChatCompletions service (maps to aiplatformpb.ChatCompletionsRequest).
+	// See: https://github.com/googleapis/googleapis/blob/89c3153888201c9e80bc5ec78d6ffca0debe6b52/google/cloud/aiplatform/v1beta1/prediction_service.proto#L234 for definition.
 	chatCompletionsMethod         = "PredictionService/ChatCompletions"
 	// streamRawPredictServiceMethod is the gRPC method path suffix for Vertex AI's flexible,
 	// low-level raw prediction streaming service (maps to aiplatformpb.StreamRawPredictRequest).
+	// See: https://github.com/googleapis/googleapis/blob/89c3153888201c9e80bc5ec78d6ffca0debe6b52/google/cloud/aiplatform/v1beta1/prediction_service.proto#L84 for definition.
 	streamRawPredictServiceMethod = "PredictionService/StreamRawPredict"
 	// openAIChatCompletionsPath is the standard OpenAI endpoint path for Chat Completions,
 	// used to route extracted JSON payloads to the OpenAI parser.
@@ -95,7 +97,6 @@ func (p *VertexAIParser) WithName(name string) *VertexAIParser {
 // ChatCompletionsRequest protobuf message. This message embeds an HttpBody containing the
 // actual request payload as an OpenAI-compatible JSON string. The parser extracts this JSON
 // data and delegates the parsing to the OpenAI parser.
-// See: https://github.com/googleapis/googleapis/blob/89c3153888201c9e80bc5ec78d6ffca0debe6b52/google/cloud/aiplatform/v1beta1/prediction_service.proto#L235
 func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	path := headers[parsers.MethodPathKey]
 
