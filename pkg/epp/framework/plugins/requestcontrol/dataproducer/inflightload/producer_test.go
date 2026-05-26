@@ -35,6 +35,7 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/esitmatetoken"
 	igwtestutils "github.com/llm-d/llm-d-router/test/utils/igw"
 )
 
@@ -100,6 +101,33 @@ func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
 	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 }
+
+func TestInFlightLoadProducer_UseEstimatedTokensAttributes(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "attr-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	req := makeTokenRequest("req-attr", "1234567890") // 10 chars, normally 3 input + 5 output = 8 tokens (with defaults)
+	// Manually set attributes to different values to ensure they are used
+	req.PutAttribute(esitmatetoken.EstimatedInputTokensKey, int64(20))
+	req.PutAttribute(esitmatetoken.EstimatedOutputTokensKey, int64(30))
+
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(ctx, req, res)
+
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	// 20 (input) + 30 (output) = 50 tokens
+	require.Equal(t, int64(50), producer.tokenTracker.get(endpointID), "should use estimated tokens from attributes")
+
+	// Cleanup
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
 
 func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	t.Parallel()

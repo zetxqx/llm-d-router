@@ -35,6 +35,7 @@ import (
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	sourcenotifications "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/notifications"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/esitmatetoken"
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 )
 
@@ -228,7 +229,10 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		return
 	}
 
-	inputTokens := p.tokenEstimator.EstimateInput(request)
+	inputTokens, ok := fwksched.ReadRequestAttribute[int64](request, esitmatetoken.EstimatedInputTokensKey)
+	if !ok {
+		inputTokens = p.tokenEstimator.EstimateInput(request)
+	}
 
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -250,7 +254,11 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		tokens := adjustedInput
 		if p.addEstimatedOutputTokens {
 			// Output tokens are based on the full input, not the cached portion.
-			tokens += p.tokenEstimator.EstimateOutput(inputTokens)
+			outputTokens, ok := fwksched.ReadRequestAttribute[int64](request, esitmatetoken.EstimatedOutputTokensKey)
+			if !ok {
+				outputTokens = p.tokenEstimator.EstimateOutput(inputTokens)
+			}
+			tokens += outputTokens
 		}
 
 		p.tokenTracker.add(eid, tokens)

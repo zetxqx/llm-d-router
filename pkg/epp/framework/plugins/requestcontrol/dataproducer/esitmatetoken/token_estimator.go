@@ -1,9 +1,9 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+you may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 
@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package approximateprefix
+package esitmatetoken
 
 import (
 	"bytes"
@@ -35,25 +35,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+const (
+	// averageCharactersPerToken is an estimated average characters per token.
+	averageCharactersPerToken = 4
+)
+
 // TokenEstimator estimates the number of tokens for different content types.
 type TokenEstimator interface {
 	Estimate(block fwkrh.ContentBlock) int
 }
 
-type approximatePrefixCacheTokenEstimator struct {
+type estimateTokenEstimator struct {
 	ctx              context.Context
-	multimodalConfig *multiModalTokenEstimatorConfig
+	multimodalConfig *MultiModalTokenEstimatorConfig
 }
 
-// NewApproximatePrefixCacheTokenEstimator returns a new TokenEstimator.
-func NewApproximatePrefixCacheTokenEstimator(ctx context.Context, multimodalConfig *multiModalTokenEstimatorConfig) TokenEstimator {
-	return &approximatePrefixCacheTokenEstimator{
+// NewTokenEstimator returns a new TokenEstimator.
+func NewTokenEstimator(ctx context.Context, multimodalConfig *MultiModalTokenEstimatorConfig) TokenEstimator {
+	return &estimateTokenEstimator{
 		ctx:              ctx,
 		multimodalConfig: multimodalConfig,
 	}
 }
 
-func (e *approximatePrefixCacheTokenEstimator) Estimate(block fwkrh.ContentBlock) int {
+func (e *estimateTokenEstimator) Estimate(block fwkrh.ContentBlock) int {
 	switch block.Type {
 	case "text":
 		return len(block.Text) / averageCharactersPerToken
@@ -70,9 +75,9 @@ func (e *approximatePrefixCacheTokenEstimator) Estimate(block fwkrh.ContentBlock
 	}
 }
 
-func getImagePlaceholders(ctx context.Context, url string, multimodalConfig *multiModalTokenEstimatorConfig) int {
+func getImagePlaceholders(ctx context.Context, url string, multimodalConfig *MultiModalTokenEstimatorConfig) int {
 	if multimodalConfig == nil || multimodalConfig.Image == nil {
-		multimodalConfig = &defaultMultimodalConfig
+		multimodalConfig = &DefaultMultimodalConfig
 	}
 	logger := log.FromContext(ctx).V(logutil.DEBUG)
 	var numPlaceHolders int
@@ -99,7 +104,7 @@ func getImagePlaceholders(ctx context.Context, url string, multimodalConfig *mul
 	return numPlaceHolders
 }
 
-func getImageDimensionsFromBase64(url string) (*resolution, error) {
+func getImageDimensionsFromBase64(url string) (*Resolution, error) {
 	idx := strings.Index(url, "base64,")
 	base64Data := url[idx+7:]
 	decoded, err := base64.StdEncoding.DecodeString(base64Data)
@@ -113,7 +118,7 @@ func getImageDimensionsFromBase64(url string) (*resolution, error) {
 	if config.Width <= 0 || config.Height <= 0 {
 		return nil, errors.New("image config width and height must be positive")
 	}
-	return &resolution{
+	return &Resolution{
 		Width:  config.Width,
 		Height: config.Height,
 	}, nil
