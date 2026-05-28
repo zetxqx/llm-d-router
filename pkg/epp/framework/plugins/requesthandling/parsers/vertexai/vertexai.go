@@ -139,13 +139,13 @@ func (p *VertexAIParser) ParseResponse(ctx context.Context, body []byte, headers
 	return p.openAIParser.ParseResponse(ctx, jsonBytes, headers, false)
 }
 
-type rawRequest interface {
+type httpBodyMessage interface {
 	proto.Message
 	GetHttpBody() *httpbody.HttpBody
 }
 
 // parseVertexRequest is a generic helper to parse Vertex AI gRPC requests that wrap an HttpBody payload.
-func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, headers map[string]string, req rawRequest, typeName string, targetPath string) (*fwkrh.ParseResult, error) {
+func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, headers map[string]string, req httpBodyMessage, typeName string, targetPath string) (*fwkrh.ParseResult, error) {
 	parsedPayload, err := grpcutil.ParseGrpcPayload(body)
 	if err != nil {
 		return nil, fmt.Errorf("invalid or unsupported gRPC payload: %w", err)
