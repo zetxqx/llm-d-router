@@ -100,6 +100,20 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello world",
+									},
+								},
+							},
+						},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{Raw: "Hello world"},
 				},
@@ -124,6 +138,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{11, 12, 13},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{
 						TokenIDs: []uint32{11, 12, 13},
@@ -162,6 +181,15 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{101, 102, 103, 104, 105},
+						MultiModalFeatures: []fwkrh.MultiModalFeature{
+							{Modality: fwkrh.ModalityImage, Hash: "hash-a", Offset: 1, Length: 2},
+							{Modality: fwkrh.ModalityImage, Hash: "hash-b", Offset: 4, Length: 1},
+						},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{TokenIDs: []uint32{101, 102, 103, 104, 105}},
 				},
@@ -210,6 +238,15 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{201, 202, 203, 204},
+						MultiModalFeatures: []fwkrh.MultiModalFeature{
+							{Modality: fwkrh.ModalityImage, Hash: "hash-only", Offset: 0, Length: 1},
+							{Modality: fwkrh.ModalityImage, Hash: "", Offset: 2, Length: 2},
+						},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{TokenIDs: []uint32{201, 202, 203, 204}},
 				},
@@ -267,6 +304,20 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Generate"},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello world",
+									},
+								},
+							},
+						},
+					},
+				},
 				Stream: true,
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{Raw: "Hello world"},
@@ -290,6 +341,11 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			},
 			headers: map[string]string{":path": "/vllm.grpc.engine.VllmEngine/Embed"},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{4, 5, 6},
+					},
+				},
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input: fwkrh.EmbeddingsInput{
 						TokenIDs: []uint32{4, 5, 6},

@@ -192,7 +192,20 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 	var body *fwkrh.InferenceRequestBody
 	switch pbReq.Input.(type) {
 	case *pb.GenerateRequest_Text:
+		prompt := fwkrh.UnifiedPrompt{
+			Messages: []fwkrh.PromptMessage{
+				{
+					Blocks: []fwkrh.PromptBlock{
+						{
+							Type: fwkrh.BlockTypeText,
+							Text: pbReq.GetText(),
+						},
+					},
+				},
+			},
+		}
 		body = &fwkrh.InferenceRequestBody{
+			Prompts: []fwkrh.UnifiedPrompt{prompt},
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{Raw: pbReq.GetText()},
 			},
@@ -206,14 +219,23 @@ func convertToInferenceRequestBody(pbReq *pb.GenerateRequest) (*fwkrh.InferenceR
 		inputIDs := tokenized.GetInputIds()
 		copiedTokenIDsInt := make([]uint32, len(inputIDs))
 		copy(copiedTokenIDsInt, inputIDs)
+
+		mmFeatures := convertMultiModalFeatures(pbReq.GetMmInputs())
+
 		body = &fwkrh.InferenceRequestBody{
+			TokenInputs: []fwkrh.TokenizedInput{
+				{
+					TokenIDs:           copiedTokenIDsInt,
+					MultiModalFeatures: mmFeatures,
+				},
+			},
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: fwkrh.Prompt{TokenIDs: copiedTokenIDsInt},
 			},
 			Payload: fwkrh.PayloadProto{Message: pbReq},
 			TokenizedPrompt: &fwkrh.TokenizedPrompt{
 				TokenIDs:           copiedTokenIDsInt,
-				MultiModalFeatures: convertMultiModalFeatures(pbReq.GetMmInputs()),
+				MultiModalFeatures: mmFeatures,
 			},
 		}
 	default:
@@ -263,6 +285,11 @@ func convertEmbedToInferenceRequestBody(pbReq *pb.EmbedRequest) (*fwkrh.Inferenc
 		tokenIDs := make([]uint32, len(inputIDs))
 		copy(tokenIDs, inputIDs)
 		body = &fwkrh.InferenceRequestBody{
+			TokenInputs: []fwkrh.TokenizedInput{
+				{
+					TokenIDs: tokenIDs,
+				},
+			},
 			Embeddings: &fwkrh.EmbeddingsRequest{
 				Input: fwkrh.EmbeddingsInput{
 					TokenIDs: tokenIDs,
