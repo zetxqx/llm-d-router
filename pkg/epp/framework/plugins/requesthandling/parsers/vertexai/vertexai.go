@@ -19,7 +19,6 @@ package vertexai
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -106,40 +105,13 @@ func (p *VertexAIParser) ParseRequest(ctx context.Context, body []byte, headers 
 
 	switch {
 	case strings.HasSuffix(path, chatCompletionsMethod):
-		parsedPayload, err := grpcutil.ParseGrpcPayload(body)
-		if err != nil {
-			return nil, fmt.Errorf("invalid or unsupported gRPC payload: %w", err)
-		}
-
-		req := &aiplatformpb.ChatCompletionsRequest{}
-		if err := proto.Unmarshal(parsedPayload, req); err != nil {
-			return nil, fmt.Errorf("unmarshaling ChatCompletionsRequest: %w", err)
-		}
-
-		httpBody := req.GetHttpBody()
-		if httpBody == nil {
-			return nil, errors.New("ChatCompletionsRequest has no HttpBody")
-		}
-		jsonBytes := httpBody.GetData()
-
-		// Use OpenAI parser to parse the JSON payload
-		// Clone headers and set path to /chat/completions to make OpenAI parser recognize it
-		headersCopy := maps.Clone(headers)
-		headersCopy[parsers.MethodPathKey] = openAIChatCompletionsPath
-		parseResult, err := p.openAIParser.ParseRequest(ctx, jsonBytes, headersCopy)
-		if err != nil {
-			return nil, fmt.Errorf("parsing ChatCompletionsRequest: %w", err)
-		}
-
-		inferenceRequestBody := parseResult.Body
-		inferenceRequestBody.Payload = fwkrh.PayloadProto{Message: req}
-		return &fwkrh.ParseResult{Body: inferenceRequestBody, Skip: parseResult.Skip}, nil
+		return p.parseVertexRequest(ctx, body, headers, &aiplatformpb.ChatCompletionsRequest{}, "ChatCompletionsRequest", openAIChatCompletionsPath)
 
 	case strings.HasSuffix(path, streamRawPredictServiceMethod):
-		return p.parseRawPredict(ctx, body, headers, &aiplatformpb.StreamRawPredictRequest{}, "StreamRawPredictRequest")
+		return p.parseVertexRequest(ctx, body, headers, &aiplatformpb.StreamRawPredictRequest{}, "StreamRawPredictRequest", openAIResponsesPath)
 
 	case strings.HasSuffix(path, rawPredictServiceMethod):
-		return p.parseRawPredict(ctx, body, headers, &aiplatformpb.RawPredictRequest{}, "RawPredictRequest")
+		return p.parseVertexRequest(ctx, body, headers, &aiplatformpb.RawPredictRequest{}, "RawPredictRequest", openAIResponsesPath)
 
 	default:
 		return &fwkrh.ParseResult{Skip: true}, nil
@@ -172,7 +144,8 @@ type rawRequest interface {
 	GetHttpBody() *httpbody.HttpBody
 }
 
-func (p *VertexAIParser) parseRawPredict(ctx context.Context, body []byte, headers map[string]string, req rawRequest, typeName string) (*fwkrh.ParseResult, error) {
+// parseVertexRequest is a generic helper to parse Vertex AI gRPC requests that wrap an HttpBody payload.
+func (p *VertexAIParser) parseVertexRequest(ctx context.Context, body []byte, headers map[string]string, req rawRequest, typeName string, targetPath string) (*fwkrh.ParseResult, error) {
 	parsedPayload, err := grpcutil.ParseGrpcPayload(body)
 	if err != nil {
 		return nil, fmt.Errorf("invalid or unsupported gRPC payload: %w", err)
@@ -189,9 +162,9 @@ func (p *VertexAIParser) parseRawPredict(ctx context.Context, body []byte, heade
 	jsonBytes := httpBody.GetData()
 
 	// Use OpenAI parser to parse the JSON payload
-	// Clone headers and set path to /responses to make OpenAI parser recognize it
+	// Clone headers and set path to targetPath to make OpenAI parser recognize it
 	headersCopy := maps.Clone(headers)
-	headersCopy[parsers.MethodPathKey] = openAIResponsesPath
+	headersCopy[parsers.MethodPathKey] = targetPath
 	parseResult, err := p.openAIParser.ParseRequest(ctx, jsonBytes, headersCopy)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", typeName, err)
