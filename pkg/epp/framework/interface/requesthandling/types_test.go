@@ -409,7 +409,7 @@ func TestInferenceRequestBody_InputTokenCountHint(t *testing.T) {
 			name: "unified tokens returns count",
 			body: &InferenceRequestBody{
 				Tokens: &TokenizedInput{
-					TokenIDs: []uint32{10, 20, 30},
+					TokenIDs: [][]uint32{{10, 20, 30}},
 				},
 			},
 			wantHint: 3,
@@ -429,7 +429,7 @@ func TestInferenceRequestBody_InputTokenCountHint(t *testing.T) {
 			name: "unified tokens prioritized over legacy completions",
 			body: &InferenceRequestBody{
 				Tokens: &TokenizedInput{
-					TokenIDs: []uint32{10, 20, 30},
+					TokenIDs: [][]uint32{{10, 20, 30}},
 				},
 				Completions: &CompletionsRequest{
 					Prompt: Prompt{TokenIDs: []uint32{1, 2}},

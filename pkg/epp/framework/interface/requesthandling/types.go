@@ -103,8 +103,9 @@ type InferenceRequestBody struct {
 // TokenizedInput represents pre-tokenized input provided by the client,
 // including multimodal features if present.
 type TokenizedInput struct {
-	// TokenIDs are the pre-tokenized input token IDs.
-	TokenIDs []uint32
+	// TokenIDs are the pre-tokenized input token IDs. It supports an array of token
+	// arrays to accommodate batched prompts (e.g., from /completions).
+	TokenIDs [][]uint32
 	// MultiModalFeatures holds one entry per multimodal item in prompt order.
 	MultiModalFeatures []MultiModalFeature
 }
@@ -253,7 +254,11 @@ func (r *InferenceRequestBody) PromptText() string {
 func (r *InferenceRequestBody) InputTokenCountHint() int {
 	if r.Prompt != nil || r.Tokens != nil {
 		if r.Tokens != nil && len(r.Tokens.TokenIDs) > 0 {
-			return len(r.Tokens.TokenIDs)
+			total := 0
+			for _, ids := range r.Tokens.TokenIDs {
+				total += len(ids)
+			}
+			return total
 		}
 		return -1
 	}
