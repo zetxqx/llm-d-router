@@ -153,12 +153,14 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 		{
 			name: "unified prompt with single text block",
 			body: &InferenceRequestBody{
-				Prompt: &UnifiedPrompt{
-					Items: []PromptItem{
-						{
-							Role: "user",
-							Blocks: []PromptBlock{
-								{Type: BlockTypeText, Text: "hello"},
+				Prompts: []UnifiedPrompt{
+					{
+						Messages: []PromptMessage{
+							{
+								Role: "user",
+								Blocks: []PromptBlock{
+									{Type: BlockTypeText, Text: "hello"},
+								},
 							},
 						},
 					},
@@ -169,19 +171,21 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 		{
 			name: "unified prompt with multiple text blocks and empty role",
 			body: &InferenceRequestBody{
-				Prompt: &UnifiedPrompt{
-					Items: []PromptItem{
-						{
-							Role: "system",
-							Blocks: []PromptBlock{
-								{Type: BlockTypeText, Text: "instructions"},
+				Prompts: []UnifiedPrompt{
+					{
+						Messages: []PromptMessage{
+							{
+								Role: "system",
+								Blocks: []PromptBlock{
+									{Type: BlockTypeText, Text: "instructions"},
+								},
 							},
-						},
-						{
-							Role: "",
-							Blocks: []PromptBlock{
-								{Type: BlockTypeText, Text: "user input"},
-								{Type: BlockTypeImage, AssetURI: "http://image"}, // ignored in text
+							{
+								Role: "",
+								Blocks: []PromptBlock{
+									{Type: BlockTypeText, Text: "user input"},
+									{Type: BlockTypeImage, AssetURI: "http://image"}, // ignored in text
+								},
 							},
 						},
 					},
@@ -192,18 +196,18 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 		{
 			name: "unified prompt with documents",
 			body: &InferenceRequestBody{
-				Prompt: &UnifiedPrompt{
-					Items: []PromptItem{
-						{
-							Role: "user",
-							Blocks: []PromptBlock{
-								{Type: BlockTypeText, Text: "query"},
+				Prompts: []UnifiedPrompt{
+					{
+						Messages: []PromptMessage{
+							{
+								Role: "user",
+								Blocks: []PromptBlock{
+									{Type: BlockTypeText, Text: "query"},
+									{Type: BlockTypeDoc, Text: "doc1 text"},
+									{Type: BlockTypeDoc, Text: `{"content":"doc2 text"}`},
+								},
 							},
 						},
-					},
-					Documents: []any{
-						"doc1 text",
-						map[string]any{"content": "doc2 text"},
 					},
 				},
 			},
@@ -212,12 +216,14 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 		{
 			name: "unified prompt prioritized over legacy completions",
 			body: &InferenceRequestBody{
-				Prompt: &UnifiedPrompt{
-					Items: []PromptItem{
-						{
-							Role: "user",
-							Blocks: []PromptBlock{
-								{Type: BlockTypeText, Text: "unified"},
+				Prompts: []UnifiedPrompt{
+					{
+						Messages: []PromptMessage{
+							{
+								Role: "user",
+								Blocks: []PromptBlock{
+									{Type: BlockTypeText, Text: "unified"},
+								},
 							},
 						},
 					},
@@ -408,8 +414,10 @@ func TestInferenceRequestBody_InputTokenCountHint(t *testing.T) {
 		{
 			name: "unified tokens returns count",
 			body: &InferenceRequestBody{
-				Tokens: &TokenizedInput{
-					TokenIDs: [][]uint32{{10, 20, 30}},
+				TokenInputs: []TokenizedInput{
+					{
+						TokenIDs: []uint32{10, 20, 30},
+					},
 				},
 			},
 			wantHint: 3,
@@ -417,9 +425,11 @@ func TestInferenceRequestBody_InputTokenCountHint(t *testing.T) {
 		{
 			name: "unified prompt with nil tokens returns -1",
 			body: &InferenceRequestBody{
-				Prompt: &UnifiedPrompt{
-					Items: []PromptItem{
-						{Blocks: []PromptBlock{{Type: BlockTypeText, Text: "hello"}}},
+				Prompts: []UnifiedPrompt{
+					{
+						Messages: []PromptMessage{
+							{Blocks: []PromptBlock{{Type: BlockTypeText, Text: "hello"}}},
+						},
 					},
 				},
 			},
@@ -428,8 +438,10 @@ func TestInferenceRequestBody_InputTokenCountHint(t *testing.T) {
 		{
 			name: "unified tokens prioritized over legacy completions",
 			body: &InferenceRequestBody{
-				Tokens: &TokenizedInput{
-					TokenIDs: [][]uint32{{10, 20, 30}},
+				TokenInputs: []TokenizedInput{
+					{
+						TokenIDs: []uint32{10, 20, 30},
+					},
 				},
 				Completions: &CompletionsRequest{
 					Prompt: Prompt{TokenIDs: []uint32{1, 2}},

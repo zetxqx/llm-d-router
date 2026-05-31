@@ -66,10 +66,14 @@ func (RawPayload) IsParsed() bool    { return false }
 // InferenceRequestBody contains the request-body fields that we parse out as user input,
 // to be used in forming scheduling decisions.
 type InferenceRequestBody struct {
-	// Prompt is the unified representation of the user input.
-	Prompt *UnifiedPrompt
-	// Tokens is the pre-tokenized input provided by the client.
-	Tokens *TokenizedInput
+	// Prompts contains the unified representation of the user inputs.
+	// Supports batching (multiple prompts). For a single-prompt request,
+	// the input is located at index 0 (Prompts[0]).
+	Prompts []UnifiedPrompt
+	// TokenInputs is the pre-tokenized input provided by the client.
+	// Supports batching (multiple token streams). For a single-prompt request,
+	// the input is located at index 0 (TokenInputs[0]).
+	TokenInputs []TokenizedInput
 	// ExtractedCacheSalt is an optional request parameter to isolate prefix caches for security reasons.
 	ExtractedCacheSalt string
 
@@ -87,6 +91,7 @@ type InferenceRequestBody struct {
 	Embeddings *EmbeddingsRequest `json:"embeddings,omitempty"`
 	// GenerateRequest is the representation of the vLLM /inference/v1/generate request body.
 	Generate *GenerateRequest `json:"generate,omitempty"`
+
 	// Payload contains the unmarshaled request payload or raw bytes.
 	// If the payload is unmarshaled, we can perform advanced processing (like prefix cache aware routing).
 	// If it remains as raw bytes, such processing may not be supported.
@@ -103,28 +108,23 @@ type InferenceRequestBody struct {
 // TokenizedInput represents pre-tokenized input provided by the client,
 // including multimodal features if present.
 type TokenizedInput struct {
-	// TokenIDs are the pre-tokenized input token IDs. It supports an array of token
-	// arrays to accommodate batched prompts (e.g., from /completions).
-	TokenIDs [][]uint32
+	// TokenIDs are the pre-tokenized input token IDs for a single prompt.
+	TokenIDs []uint32
 	// MultiModalFeatures holds one entry per multimodal item in prompt order.
 	MultiModalFeatures []MultiModalFeature
 }
 
-// UnifiedPrompt is a unified representation of the user input (prompt) for all request types.
+// UnifiedPrompt is a unified representation of the user input (prompt) for a single request item.
 type UnifiedPrompt struct {
-	// Items represents structured chat history or conversation items.
-	Items []PromptItem
-	// Tools field for function calling capabilities.
-	Tools []any
-	// Documents field for HuggingFace RAG documents.
-	Documents []any
+	// Messages represents the structured chat history or conversation turns.
+	Messages []PromptMessage
 }
 
-// PromptItem represents a single turn or message in a conversation.
-type PromptItem struct {
+// PromptMessage represents a single turn or message in a conversation.
+type PromptMessage struct {
 	// Role specifies the role (e.g., 'user', 'assistant', 'system').
 	Role string
-	// Blocks contains the content blocks for this item.
+	// Blocks contains the content blocks for this message.
 	Blocks []PromptBlock
 }
 
@@ -136,19 +136,23 @@ const (
 	BlockTypeImage BlockType = "image"
 	BlockTypeAudio BlockType = "audio"
 	BlockTypeVideo BlockType = "video"
+	BlockTypeTool  BlockType = "tool"
+	BlockTypeDoc   BlockType = "document"
 )
 
-// PromptBlock represents a content block (text or asset) within a prompt item.
+// PromptBlock represents a content block (text, asset, tool, or document) within a prompt item.
 type PromptBlock struct {
-	// Type specifies the block type (e.g., 'text', 'image').
+	// Type specifies the block type (e.g., 'text', 'image', 'tool', 'document').
 	Type BlockType
-	// Text contains raw text content.
+	// Text contains raw text content (e.g. text block, document content, tool description).
 	Text string
 	// AssetURI refers to a multimodal asset (e.g., image URL, audio data hash).
 	AssetURI string
+	// Data holds structured data for complex blocks (like Tool or Document).
+	Data any
 }
 
-// TokenizedPrompt contains the result of tokenizing the request prompt.
+// TokenizedPrompt contains the result of tokenizing a single request prompt.
 // It is consumed by scheduling and request-control plugins that benefit from
 // actual token data such as prefix-cache awareness.
 type TokenizedPrompt struct {
@@ -173,26 +177,15 @@ type MultiModalFeature struct {
 	Length int
 }
 
-// PromptText returns a plain-text representation of the prompt.
+// PromptText returns a plain-text representation of the prompt, aggregating all batched prompts.
 func (r *InferenceRequestBody) PromptText() string {
-	if r.Prompt != nil {
+	if len(r.Prompts) > 0 {
 		var sb strings.Builder
-		for _, item := range r.Prompt.Items {
-			for _, block := range item.Blocks {
-				if block.Type == BlockTypeText && block.Text != "" {
-					sb.WriteString(block.Text)
-					sb.WriteString(" ")
-				}
-			}
-		}
-		if len(r.Prompt.Documents) > 0 {
-			for _, doc := range r.Prompt.Documents {
-				if str, ok := doc.(string); ok {
-					sb.WriteString(str)
-					sb.WriteString(" ")
-				} else {
-					if bytes, err := json.Marshal(doc); err == nil {
-						sb.Write(bytes)
+		for _, prompt := range r.Prompts {
+			for _, msg := range prompt.Messages {
+				for _, block := range msg.Blocks {
+					if (block.Type == BlockTypeText || block.Type == BlockTypeDoc) && block.Text != "" {
+						sb.WriteString(block.Text)
 						sb.WriteString(" ")
 					}
 				}
@@ -250,17 +243,14 @@ func (r *InferenceRequestBody) PromptText() string {
 
 // InputTokenCountHint returns a best-effort input token count when the
 // caller knows it exactly (token-ID inputs), or -1 when the count has
-// to be estimated from text.
+// to be estimated from text. It aggregates counts from all batched tokens.
 func (r *InferenceRequestBody) InputTokenCountHint() int {
-	if r.Prompt != nil || r.Tokens != nil {
-		if r.Tokens != nil && len(r.Tokens.TokenIDs) > 0 {
-			total := 0
-			for _, ids := range r.Tokens.TokenIDs {
-				total += len(ids)
-			}
-			return total
+	if len(r.TokenInputs) > 0 {
+		total := 0
+		for _, t := range r.TokenInputs {
+			total += len(t.TokenIDs)
 		}
-		return -1
+		return total
 	}
 
 	// Fallback to old fields
@@ -827,4 +817,37 @@ type AnthropicImageSource struct {
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
+}
+
+// ConvertMMFeaturesToUpstream flattens the kv-cache map-shaped multimodal
+// metadata into the upstream flat list, sorted by placeholder offset.
+func ConvertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []MultiModalFeature {
+	if src == nil || len(src.MMHashes) == 0 {
+		return nil
+	}
+
+	var items []MultiModalFeature
+	for modality, hashes := range src.MMHashes {
+		ranges, ok := src.MMPlaceholders[modality]
+		if !ok {
+			continue
+		}
+		n := len(hashes)
+		if len(ranges) < n {
+			n = len(ranges)
+		}
+		for i := 0; i < n; i++ {
+			items = append(items, MultiModalFeature{
+				Modality: Modality(modality),
+				Hash:     hashes[i],
+				Offset:   ranges[i].Offset,
+				Length:   ranges[i].Length,
+			})
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Offset < items[j].Offset })
+	return items
 }
