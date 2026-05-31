@@ -132,12 +132,12 @@ type PromptMessage struct {
 type BlockType string
 
 const (
-	BlockTypeText  BlockType = "text"
-	BlockTypeImage BlockType = "image"
-	BlockTypeAudio BlockType = "audio"
-	BlockTypeVideo BlockType = "video"
-	BlockTypeTool  BlockType = "tool"
-	BlockTypeDoc   BlockType = "document"
+	BlockTypeText     BlockType = "text"
+	BlockTypeImage    BlockType = "image"
+	BlockTypeAudio    BlockType = "audio"
+	BlockTypeVideo    BlockType = "video"
+	BlockTypeTool     BlockType = "tool"
+	BlockTypeDocument BlockType = "document"
 )
 
 // PromptBlock represents a content block (text, asset, tool, or document) within a prompt item.
@@ -184,7 +184,7 @@ func (r *InferenceRequestBody) PromptText() string {
 		for _, prompt := range r.Prompts {
 			for _, msg := range prompt.Messages {
 				for _, block := range msg.Blocks {
-					if (block.Type == BlockTypeText || block.Type == BlockTypeDoc) && block.Text != "" {
+					if (block.Type == BlockTypeText || block.Type == BlockTypeDocument) && block.Text != "" {
 						sb.WriteString(block.Text)
 						sb.WriteString(" ")
 					}
@@ -817,37 +817,4 @@ type AnthropicImageSource struct {
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
-}
-
-// ConvertMMFeaturesToUpstream flattens the kv-cache map-shaped multimodal
-// metadata into the upstream flat list, sorted by placeholder offset.
-func ConvertMMFeaturesToUpstream(src *tokenization.MultiModalFeatures) []MultiModalFeature {
-	if src == nil || len(src.MMHashes) == 0 {
-		return nil
-	}
-
-	var items []MultiModalFeature
-	for modality, hashes := range src.MMHashes {
-		ranges, ok := src.MMPlaceholders[modality]
-		if !ok {
-			continue
-		}
-		n := len(hashes)
-		if len(ranges) < n {
-			n = len(ranges)
-		}
-		for i := 0; i < n; i++ {
-			items = append(items, MultiModalFeature{
-				Modality: Modality(modality),
-				Hash:     hashes[i],
-				Offset:   ranges[i].Offset,
-				Length:   ranges[i].Length,
-			})
-		}
-	}
-	if len(items) == 0 {
-		return nil
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Offset < items[j].Offset })
-	return items
 }

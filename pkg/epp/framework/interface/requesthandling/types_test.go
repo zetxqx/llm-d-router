@@ -203,8 +203,8 @@ func TestLLMRequestBody_PromptText(t *testing.T) {
 								Role: "user",
 								Blocks: []PromptBlock{
 									{Type: BlockTypeText, Text: "query"},
-									{Type: BlockTypeDoc, Text: "doc1 text"},
-									{Type: BlockTypeDoc, Text: `{"content":"doc2 text"}`},
+									{Type: BlockTypeDocument, Text: "doc1 text"},
+									{Type: BlockTypeDocument, Text: `{"content":"doc2 text"}`},
 								},
 							},
 						},
