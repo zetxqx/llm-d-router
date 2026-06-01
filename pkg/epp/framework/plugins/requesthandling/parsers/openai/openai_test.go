@@ -59,6 +59,20 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"prompt": "test prompt",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "test prompt",
+									},
+								},
+							},
+						},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{Raw: "test prompt"},
 				},
@@ -76,6 +90,20 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"prompt": []any{"Why is the sky blue?"},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Why is the sky blue?",
+									},
+								},
+							},
+						},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{Strings: []string{"Why is the sky blue?"}},
 				},
@@ -93,6 +121,32 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"prompt": []any{"prompt1", "prompt2"},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "prompt1",
+									},
+								},
+							},
+						},
+					},
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "prompt2",
+									},
+								},
+							},
+						},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{Strings: []string{"prompt1", "prompt2"}},
 				},
@@ -110,6 +164,11 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"prompt": []any{1, 2, 3},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{1, 2, 3},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{TokenIDs: []uint32{1, 2, 3}},
 				},
@@ -143,6 +202,30 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "system",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "this is a system message",
+									},
+								},
+							},
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				ChatCompletions: &fwkrh.ChatCompletionsRequest{
 					Messages: []fwkrh.Message{
 						{Role: "system", Content: fwkrh.Content{Raw: "this is a system message"}},
@@ -191,6 +274,30 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "system",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Describe this image in one sentence.",
+									},
+								},
+							},
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type:     fwkrh.BlockTypeImage,
+										AssetURI: "https://example.com/images/dui.jpg.",
+									},
+								},
+							},
+						},
+					},
+				},
 				ChatCompletions: &fwkrh.ChatCompletionsRequest{
 					Messages: []fwkrh.Message{
 						{Role: "system", Content: fwkrh.Content{
@@ -264,6 +371,25 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type:     fwkrh.BlockTypeAudio,
+										AssetURI: "base64data",
+									},
+									{
+										Type:     fwkrh.BlockTypeVideo,
+										AssetURI: "https://example.com/video.mp4",
+									},
+								},
+							},
+						},
+					},
+				},
 				ChatCompletions: &fwkrh.ChatCompletionsRequest{
 					Messages: []fwkrh.Message{
 						{Role: "user", Content: fwkrh.Content{
@@ -322,6 +448,23 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"chat_template_kwargs":         map[string]any{"key": "value"},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "hello",
+									},
+								},
+							},
+						},
+						Tools:     []any{map[string]any{"type": "function"}},
+						Documents: []any{map[string]any{"content": "doc"}},
+					},
+				},
 				ChatCompletions: &fwkrh.ChatCompletionsRequest{
 					Messages:                  []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello"}}},
 					Tools:                     []any{map[string]any{"type": "function"}},
@@ -500,17 +643,32 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			body: map[string]any{
 				"model":      "test",
 				"prompt":     "test prompt",
-				"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
+				"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "test prompt",
+									},
+								},
+							},
+						},
+					},
+				},
+				ExtractedCacheSalt: "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt:    fwkrh.Prompt{Raw: "test prompt"},
-					CacheSalt: "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
+					CacheSalt: "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 				},
 				Payload: fwkrh.PayloadMap{
 					"model":      "test",
 					"prompt":     "test prompt",
-					"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
+					"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 				},
 			},
 		},
@@ -527,15 +685,40 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 						"role": "user", "content": "hello",
 					},
 				},
-				"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
+				"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "system",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "this is a system message",
+									},
+								},
+							},
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "hello",
+									},
+								},
+							},
+						},
+					},
+				},
+				ExtractedCacheSalt: "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 				ChatCompletions: &fwkrh.ChatCompletionsRequest{
 					Messages: []fwkrh.Message{
 						{Role: "system", Content: fwkrh.Content{Raw: "this is a system message"}},
 						{Role: "user", Content: fwkrh.Content{Raw: "hello"}},
 					},
-					CacheSalt: "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
+					CacheSalt: "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 				},
 				Payload: fwkrh.PayloadMap{
 					"model": "test",
@@ -547,7 +730,7 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 							"role": "user", "content": "hello",
 						},
 					},
-					"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Zud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
+					"cache_salt": "Z3V2bmV3aGxza3ZubGFoZ3Vud3V3ZWZ2bmd0b3V2bnZmc2xpZ3RoZ2x2aQ==",
 				},
 			},
 		},
@@ -560,6 +743,28 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"instructions": "You are a coding assistant that talks like a pirate.",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "You are a coding assistant that talks like a pirate.",
+									},
+								},
+							},
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "How do I check if a Python object is an instance of a class?",
+									},
+								},
+							},
+						},
+					},
+				},
 				Responses: &fwkrh.ResponsesRequest{
 					Input:        "How do I check if a Python object is an instance of a class?",
 					Instructions: "You are a coding assistant that talks like a pirate.",
@@ -580,6 +785,21 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"cache_salt": "abc123",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "test input",
+									},
+								},
+							},
+						},
+					},
+				},
+				ExtractedCacheSalt: "abc123",
 				Responses: &fwkrh.ResponsesRequest{
 					Input:     "test input",
 					CacheSalt: "abc123",
@@ -611,6 +831,21 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				Conversations: &fwkrh.ConversationsRequest{
 					Items: []fwkrh.ConversationItem{
 						{Type: "message", Role: "user", Content: "Hello"},
@@ -632,6 +867,21 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				Conversations: &fwkrh.ConversationsRequest{
 					Items: []fwkrh.ConversationItem{
 						{Type: "message", Role: "user", Content: "Hello"},
@@ -653,6 +903,20 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"prompt": "test prompt",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "test prompt",
+									},
+								},
+							},
+						},
+					},
+				},
 				Completions: &fwkrh.CompletionsRequest{
 					Prompt: fwkrh.Prompt{Raw: "test prompt"},
 				},
@@ -673,6 +937,21 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"stream": true,
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Role: "user",
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "hello",
+									},
+								},
+							},
+						},
+					},
+				},
 				ChatCompletions: &fwkrh.ChatCompletionsRequest{
 					Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello"}}},
 				},
@@ -695,6 +974,20 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"input": "The food was delicious and the waiter...",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "The food was delicious and the waiter...",
+									},
+								},
+							},
+						},
+					},
+				},
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input: fwkrh.EmbeddingsInput{Raw: "The food was delicious and the waiter..."},
 				},
@@ -712,6 +1005,32 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"input": []any{"First document", "Second document"},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "First document",
+									},
+								},
+							},
+						},
+					},
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "Second document",
+									},
+								},
+							},
+						},
+					},
+				},
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input: fwkrh.EmbeddingsInput{Strings: []string{"First document", "Second document"}},
 				},
@@ -729,6 +1048,11 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"input": []any{1, 2, 3},
 			},
 			want: &fwkrh.InferenceRequestBody{
+				TokenInputs: []fwkrh.TokenizedInput{
+					{
+						TokenIDs: []uint32{1, 2, 3},
+					},
+				},
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input: fwkrh.EmbeddingsInput{TokenIDs: []uint32{1, 2, 3}},
 				},
@@ -747,6 +1071,21 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"cache_salt": "embeddings-salt-123",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "embed this text",
+									},
+								},
+							},
+						},
+					},
+				},
+				ExtractedCacheSalt: "embeddings-salt-123",
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input:     fwkrh.EmbeddingsInput{Raw: "embed this text"},
 					CacheSalt: "embeddings-salt-123",
@@ -766,6 +1105,20 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 				"input": "text to embed",
 			},
 			want: &fwkrh.InferenceRequestBody{
+				Prompts: []fwkrh.UnifiedPrompt{
+					{
+						Messages: []fwkrh.PromptMessage{
+							{
+								Blocks: []fwkrh.PromptBlock{
+									{
+										Type: fwkrh.BlockTypeText,
+										Text: "text to embed",
+									},
+								},
+							},
+						},
+					},
+				},
 				Embeddings: &fwkrh.EmbeddingsRequest{
 					Input: fwkrh.EmbeddingsInput{Raw: "text to embed"},
 				},

@@ -203,14 +203,18 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 	case conversationsAPI:
 		var conversations fwkrh.ConversationsRequest
 		if err := json.Unmarshal(rawBody, &conversations); err == nil && len(conversations.Items) > 0 {
-			return &fwkrh.InferenceRequestBody{Conversations: &conversations}, nil
+			body := convertConversations(&conversations)
+			body.Conversations = &conversations
+			return body, nil
 		}
 		return nil, errors.New("invalid conversations request: must have items field")
 
 	case responsesAPI:
 		var responses fwkrh.ResponsesRequest
 		if err := json.Unmarshal(rawBody, &responses); err == nil && responses.Input != nil {
-			return &fwkrh.InferenceRequestBody{Responses: &responses}, nil
+			body := convertResponses(&responses)
+			body.Responses = &responses
+			return body, nil
 		}
 		return nil, errors.New("invalid responses request: must have input field")
 
@@ -218,7 +222,9 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 		var chatCompletions fwkrh.ChatCompletionsRequest
 		if err := json.Unmarshal(rawBody, &chatCompletions); err == nil {
 			if err = validateChatCompletionsMessages(chatCompletions.Messages); err == nil {
-				return &fwkrh.InferenceRequestBody{ChatCompletions: &chatCompletions}, nil
+				body := convertChatCompletions(&chatCompletions)
+				body.ChatCompletions = &chatCompletions
+				return body, nil
 			}
 		}
 		return nil, errors.New("invalid chat completions request: must have valid messages field")
@@ -226,14 +232,18 @@ func extractRequestBody(rawBody []byte, headers map[string]string) (*fwkrh.Infer
 	case completionsAPI:
 		var completions fwkrh.CompletionsRequest
 		if err := json.Unmarshal(rawBody, &completions); err == nil && !completions.Prompt.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Completions: &completions}, nil
+			body := convertCompletions(&completions)
+			body.Completions = &completions
+			return body, nil
 		}
 		return nil, errors.New("invalid completions request: must have prompt field")
 
 	case embeddingsAPI:
 		var embeddings fwkrh.EmbeddingsRequest
 		if err := json.Unmarshal(rawBody, &embeddings); err == nil && !embeddings.Input.IsEmpty() {
-			return &fwkrh.InferenceRequestBody{Embeddings: &embeddings}, nil
+			body := convertEmbeddings(&embeddings)
+			body.Embeddings = &embeddings
+			return body, nil
 		}
 		return nil, errors.New("invalid embeddings request: must have input field")
 	default:
@@ -375,5 +385,292 @@ func extractUsageStreaming(responseText string) *fwkrh.Usage {
 			}
 		}
 	}
+	return nil
+}
+
+func convertConversations(req *fwkrh.ConversationsRequest) *fwkrh.InferenceRequestBody {
+	unifiedPrompt := fwkrh.UnifiedPrompt{}
+	for _, item := range req.Items {
+		unifiedPrompt.Messages = append(unifiedPrompt.Messages, fwkrh.PromptMessage{
+			Role:   item.Role,
+			Blocks: decodeContentToBlocks(item.Content),
+		})
+	}
+	return &fwkrh.InferenceRequestBody{
+		Prompts:            []fwkrh.UnifiedPrompt{unifiedPrompt},
+		ExtractedCacheSalt: req.CacheSalt,
+	}
+}
+
+func convertResponses(req *fwkrh.ResponsesRequest) *fwkrh.InferenceRequestBody {
+	var messages []fwkrh.PromptMessage
+
+	if req.Instructions != nil {
+		if str, ok := req.Instructions.(string); ok && str != "" {
+			messages = append(messages, fwkrh.PromptMessage{
+				Blocks: []fwkrh.PromptBlock{
+					{
+						Type: fwkrh.BlockTypeText,
+						Text: str,
+					},
+				},
+			})
+		}
+	}
+
+	var tools []any
+	if req.Tools != nil {
+		if slice, ok := req.Tools.([]any); ok {
+			tools = slice
+		} else {
+			tools = []any{req.Tools}
+		}
+	}
+
+	if req.Input != nil {
+		if str, ok := req.Input.(string); ok {
+			messages = append(messages, fwkrh.PromptMessage{
+				Blocks: []fwkrh.PromptBlock{
+					{
+						Type: fwkrh.BlockTypeText,
+						Text: str,
+					},
+				},
+			})
+		} else if slice, ok := req.Input.([]any); ok {
+			for _, itemVal := range slice {
+				if itemMap, ok := itemVal.(map[string]any); ok {
+					role, _ := itemMap["role"].(string)
+					contentVal := itemMap["content"]
+					messages = append(messages, fwkrh.PromptMessage{
+						Role:   role,
+						Blocks: decodeContentToBlocks(contentVal),
+					})
+				}
+			}
+		}
+	}
+
+	unifiedPrompt := fwkrh.UnifiedPrompt{
+		Messages: messages,
+		Tools:    tools,
+	}
+	return &fwkrh.InferenceRequestBody{
+		Prompts:            []fwkrh.UnifiedPrompt{unifiedPrompt},
+		ExtractedCacheSalt: req.CacheSalt,
+	}
+}
+
+func convertStructuredContentToBlocks(content fwkrh.Content) []fwkrh.PromptBlock {
+	var blocks []fwkrh.PromptBlock
+	if content.Raw != "" {
+		blocks = append(blocks, fwkrh.PromptBlock{
+			Type: fwkrh.BlockTypeText,
+			Text: content.Raw,
+		})
+		return blocks
+	}
+	for _, block := range content.Structured {
+		switch block.Type {
+		case "text":
+			blocks = append(blocks, fwkrh.PromptBlock{
+				Type: fwkrh.BlockTypeText,
+				Text: block.Text,
+			})
+		case "image_url":
+			blocks = append(blocks, fwkrh.PromptBlock{
+				Type:     fwkrh.BlockTypeImage,
+				AssetURI: block.ImageURL.URL,
+			})
+		case "input_audio":
+			blocks = append(blocks, fwkrh.PromptBlock{
+				Type:     fwkrh.BlockTypeAudio,
+				AssetURI: block.InputAudio.Data,
+			})
+		case "video_url":
+			blocks = append(blocks, fwkrh.PromptBlock{
+				Type:     fwkrh.BlockTypeVideo,
+				AssetURI: block.VideoURL.URL,
+			})
+		}
+	}
+	return blocks
+}
+
+func convertChatCompletions(req *fwkrh.ChatCompletionsRequest) *fwkrh.InferenceRequestBody {
+	messages := make([]fwkrh.PromptMessage, 0, len(req.Messages))
+
+	for _, msg := range req.Messages {
+		messages = append(messages, fwkrh.PromptMessage{
+			Role:   msg.Role,
+			Blocks: convertStructuredContentToBlocks(msg.Content),
+		})
+	}
+
+	unifiedPrompt := fwkrh.UnifiedPrompt{
+		Messages:  messages,
+		Tools:     req.Tools,
+		Documents: req.Documents,
+	}
+	return &fwkrh.InferenceRequestBody{
+		Prompts:            []fwkrh.UnifiedPrompt{unifiedPrompt},
+		ExtractedCacheSalt: req.CacheSalt,
+	}
+}
+
+func convertCompletions(req *fwkrh.CompletionsRequest) *fwkrh.InferenceRequestBody {
+	body := &fwkrh.InferenceRequestBody{
+		ExtractedCacheSalt: req.CacheSalt,
+	}
+
+	if len(req.Prompt.TokenIDs) > 0 {
+		tokenizedInput := fwkrh.TokenizedInput{
+			TokenIDs: req.Prompt.TokenIDs,
+		}
+		body.TokenInputs = []fwkrh.TokenizedInput{tokenizedInput}
+		return body
+	}
+
+	if req.Prompt.Raw != "" {
+		unifiedPrompt := fwkrh.UnifiedPrompt{
+			Messages: []fwkrh.PromptMessage{
+				{
+					Blocks: []fwkrh.PromptBlock{
+						{
+							Type: fwkrh.BlockTypeText,
+							Text: req.Prompt.Raw,
+						},
+					},
+				},
+			},
+		}
+		body.Prompts = []fwkrh.UnifiedPrompt{unifiedPrompt}
+	} else if len(req.Prompt.Strings) > 0 {
+		body.Prompts = make([]fwkrh.UnifiedPrompt, len(req.Prompt.Strings))
+		for i, str := range req.Prompt.Strings {
+			body.Prompts[i] = fwkrh.UnifiedPrompt{
+				Messages: []fwkrh.PromptMessage{
+					{
+						Blocks: []fwkrh.PromptBlock{
+							{
+								Type: fwkrh.BlockTypeText,
+								Text: str,
+							},
+						},
+					},
+				},
+			}
+		}
+	}
+
+	return body
+}
+
+func convertEmbeddings(req *fwkrh.EmbeddingsRequest) *fwkrh.InferenceRequestBody {
+	body := &fwkrh.InferenceRequestBody{
+		ExtractedCacheSalt: req.CacheSalt,
+	}
+
+	if len(req.Input.TokenIDs) > 0 {
+		tokenizedInput := fwkrh.TokenizedInput{
+			TokenIDs: req.Input.TokenIDs,
+		}
+		body.TokenInputs = []fwkrh.TokenizedInput{tokenizedInput}
+		return body
+	}
+
+	if req.Input.Raw != "" {
+		unifiedPrompt := fwkrh.UnifiedPrompt{
+			Messages: []fwkrh.PromptMessage{
+				{
+					Blocks: []fwkrh.PromptBlock{
+						{
+							Type: fwkrh.BlockTypeText,
+							Text: req.Input.Raw,
+						},
+					},
+				},
+			},
+		}
+		body.Prompts = []fwkrh.UnifiedPrompt{unifiedPrompt}
+	} else if len(req.Input.Strings) > 0 {
+		body.Prompts = make([]fwkrh.UnifiedPrompt, len(req.Input.Strings))
+		for i, str := range req.Input.Strings {
+			body.Prompts[i] = fwkrh.UnifiedPrompt{
+				Messages: []fwkrh.PromptMessage{
+					{
+						Blocks: []fwkrh.PromptBlock{
+							{
+								Type: fwkrh.BlockTypeText,
+								Text: str,
+							},
+						},
+					},
+				},
+			}
+		}
+	}
+
+	return body
+}
+
+func decodeContentToBlocks(rawContent any) []fwkrh.PromptBlock {
+	if rawContent == nil {
+		return nil
+	}
+
+	// Case 1: Simple string
+	if str, ok := rawContent.(string); ok {
+		return []fwkrh.PromptBlock{
+			{
+				Type: fwkrh.BlockTypeText,
+				Text: str,
+			},
+		}
+	}
+
+	// Case 2: Array of blocks
+	if slice, ok := rawContent.([]any); ok {
+		var blocks []fwkrh.PromptBlock
+		for _, item := range slice {
+			if blockMap, ok := item.(map[string]any); ok {
+				blockType, _ := blockMap["type"].(string)
+				switch blockType {
+				case "text":
+					text, _ := blockMap["text"].(string)
+					blocks = append(blocks, fwkrh.PromptBlock{
+						Type: fwkrh.BlockTypeText,
+						Text: text,
+					})
+				case "image_url":
+					if imgMap, ok := blockMap["image_url"].(map[string]any); ok {
+						url, _ := imgMap["url"].(string)
+						blocks = append(blocks, fwkrh.PromptBlock{
+							Type:     fwkrh.BlockTypeImage,
+							AssetURI: url,
+						})
+					}
+				case "input_audio":
+					if audioMap, ok := blockMap["input_audio"].(map[string]any); ok {
+						data, _ := audioMap["data"].(string)
+						blocks = append(blocks, fwkrh.PromptBlock{
+							Type:     fwkrh.BlockTypeAudio,
+							AssetURI: data,
+						})
+					}
+				case "video_url":
+					if videoMap, ok := blockMap["video_url"].(map[string]any); ok {
+						url, _ := videoMap["url"].(string)
+						blocks = append(blocks, fwkrh.PromptBlock{
+							Type:     fwkrh.BlockTypeVideo,
+							AssetURI: url,
+						})
+					}
+				}
+			}
+		}
+		return blocks
+	}
+
 	return nil
 }

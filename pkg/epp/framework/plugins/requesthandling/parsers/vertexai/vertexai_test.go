@@ -90,6 +90,21 @@ func TestParseRequest(t *testing.T) {
 			},
 			wantResult: &fwkrh.ParseResult{
 				Body: &fwkrh.InferenceRequestBody{
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Role: "user",
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "Hello",
+										},
+									},
+								},
+							},
+						},
+					},
 					ChatCompletions: &fwkrh.ChatCompletionsRequest{
 						Messages: []fwkrh.Message{
 							{Role: "user", Content: fwkrh.Content{Raw: "Hello"}},
@@ -110,6 +125,20 @@ func TestParseRequest(t *testing.T) {
 			},
 			wantResult: &fwkrh.ParseResult{
 				Body: &fwkrh.InferenceRequestBody{
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "Hello from stream raw predict",
+										},
+									},
+								},
+							},
+						},
+					},
 					Responses: &fwkrh.ResponsesRequest{
 						Input: "Hello from stream raw predict",
 					},
@@ -127,6 +156,20 @@ func TestParseRequest(t *testing.T) {
 			},
 			wantResult: &fwkrh.ParseResult{
 				Body: &fwkrh.InferenceRequestBody{
+					Prompts: []fwkrh.UnifiedPrompt{
+						{
+							Messages: []fwkrh.PromptMessage{
+								{
+									Blocks: []fwkrh.PromptBlock{
+										{
+											Type: fwkrh.BlockTypeText,
+											Text: "Hello from raw predict",
+										},
+									},
+								},
+							},
+						},
+					},
 					Responses: &fwkrh.ResponsesRequest{
 						Input: "Hello from raw predict",
 					},

@@ -561,7 +561,6 @@ func TestGenerateRequest_UnmarshalJSON(t *testing.T) {
 		})
 	}
 }
-
 func TestInferenceRequestBody_CacheSalt(t *testing.T) {
 	tests := []struct {
 		name     string
