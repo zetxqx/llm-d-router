@@ -222,6 +222,7 @@ func createRequest(prompt string) *scheduling.InferenceRequest {
 				Prompt: fwkrh.Prompt{Raw: prompt},
 			},
 		},
+		RequestSizeBytes: len(prompt),
 	}
 }
 

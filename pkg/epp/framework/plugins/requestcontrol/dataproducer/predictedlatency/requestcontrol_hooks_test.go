@@ -81,7 +81,7 @@ func TestNewPredictedLatencyContext(t *testing.T) {
 
 	assert.NotNil(t, ctx)
 	assert.Equal(t, *request, ctx.schedulingRequest)
-	assert.Equal(t, "test prompt", ctx.promptText)
+	assert.Equal(t, 1, ctx.inputTokenCount) // Since RequestSizeBytes is 0, it returns 1
 	assert.NotNil(t, ctx.lastSeenMetrics)
 	assert.NotNil(t, ctx.prefixCacheScoresForEndpoints)
 	assert.NotNil(t, ctx.predictionsForScheduling)
@@ -97,7 +97,7 @@ func TestNewPredictedLatencyContext_NilBody(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Empty(t, ctx.promptText)
+	assert.Equal(t, 0, ctx.inputTokenCount)
 }
 
 func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
@@ -105,7 +105,7 @@ func TestNewPredictedLatencyContext_ChatCompletionsPrompt(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Equal(t, "You are a helpful assistant. Tell me a joke. ", ctx.promptText)
+	assert.Equal(t, 1, ctx.inputTokenCount) // Since RequestSizeBytes is 0, it returns 1
 }
 
 func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
@@ -115,7 +115,6 @@ func TestNewPredictedLatencyContext_GenerateUsesTokenIDCount(t *testing.T) {
 	ctx := newPredictedLatencyContext(request)
 
 	assert.NotNil(t, ctx)
-	assert.Empty(t, ctx.promptText)
 	assert.Equal(t, 5, ctx.inputTokenCount)
 }
 
@@ -923,7 +922,7 @@ func TestPredictedLatencyContext_Fields(t *testing.T) {
 	assert.Nil(t, ctx.targetMetadata)
 	assert.Nil(t, ctx.schedulingResult)
 	assert.Nil(t, ctx.decodeTokenSampler)
-	assert.Equal(t, "test prompt", ctx.promptText)
+	assert.Equal(t, 1, ctx.inputTokenCount)
 }
 
 func TestPredictedLatencyContext_UpdateMetrics(t *testing.T) {

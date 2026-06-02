@@ -73,6 +73,7 @@ func completionsRequest(prompt string) *scheduling.InferenceRequest {
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
 		},
+		RequestSizeBytes: len(prompt),
 	}
 }
 
@@ -100,6 +101,7 @@ func chatRequest(hasImage, hasVideo, hasAudio bool) *scheduling.InferenceRequest
 // withPrompt adds a completions body to a chat request so the PD decider can estimate tokens.
 func withPrompt(req *scheduling.InferenceRequest, prompt string) *scheduling.InferenceRequest {
 	req.Body.Completions = &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}}
+	req.RequestSizeBytes = len(prompt)
 	return req
 }
 

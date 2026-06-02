@@ -21,11 +21,6 @@ const (
 
 	// DefaultContextLengthLabel is the default label name used to identify context length ranges on pods
 	DefaultContextLengthLabel = "llm-d.ai/context-length-range"
-
-	// charToTokenMultiplier defines the multiplier to convert characters to tokens
-	// This is an approximate value and may vary based on the tokenizer used
-	// Used as a fallback when no tokenizer is configured
-	charToTokenMultiplier = 0.25
 )
 
 type contextLengthAwareParameters struct {
@@ -115,7 +110,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 	}
 
 	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Filter")
-	contextLength, usedTokenizer := p.getContextLength(ctx, request)
+	contextLength, usedTokenizer := request.EstimatedTokenLength()
 	logger.V(logging.TRACE).Info("Filtering endpoints by context length", "contextLength", contextLength, "usedTokenizer", usedTokenizer)
 
 	filteredEndpoints := []scheduling.Endpoint{}
@@ -141,7 +136,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 			continue
 		}
 
-		if contextLength >= r.min && contextLength <= r.max {
+		if int(contextLength) >= r.min && int(contextLength) <= r.max {
 			filteredEndpoints = append(filteredEndpoints, endpoint)
 		}
 	}
@@ -155,7 +150,7 @@ func (p *ContextLengthAware) Filter(ctx context.Context, request *scheduling.Inf
 // Endpoints with tighter/more specific ranges matching the request get higher scores.
 func (p *ContextLengthAware) Score(ctx context.Context, request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint) map[scheduling.Endpoint]float64 {
 	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware.Score")
-	contextLength, usedTokenizer := p.getContextLength(ctx, request)
+	contextLength, usedTokenizer := request.EstimatedTokenLength()
 	logger.V(logging.TRACE).Info("Scoring endpoints by context length", "contextLength", contextLength, "usedTokenizer", usedTokenizer)
 
 	scoredEndpoints := make(map[scheduling.Endpoint]float64)
@@ -181,7 +176,7 @@ func (p *ContextLengthAware) Score(ctx context.Context, request *scheduling.Infe
 			continue
 		}
 
-		score := calculateRangeScore(contextLength, r)
+		score := calculateRangeScore(int(contextLength), r)
 		scoredEndpoints[endpoint] = score
 	}
 
@@ -192,54 +187,6 @@ func (p *ContextLengthAware) Score(ctx context.Context, request *scheduling.Infe
 // Category returns the preference the scorer applies when scoring candidate endpoints.
 func (p *ContextLengthAware) Category() scheduling.ScorerCategory {
 	return scheduling.Affinity
-}
-
-// getContextLength returns the context length (token count) for the request.
-// It reads tokenized data from InferenceRequestBody.TokenizedPrompt as populated by the
-// tokenizer DataProducer plugin, falling back to character-based estimation
-// when tokens are not available.
-// Returns the token count and a boolean indicating whether precise tokenization was used.
-func (p *ContextLengthAware) getContextLength(ctx context.Context, request *scheduling.InferenceRequest) (int, bool) {
-	if request == nil || request.Body == nil {
-		return 0, false
-	}
-
-	if tp := request.Body.TokenizedPrompt; tp != nil && len(tp.TokenIDs) > 0 {
-		return len(tp.TokenIDs), true
-	}
-
-	logger := log.FromContext(ctx).V(logging.DEBUG).WithName("ContextLengthAware")
-	logger.Info("TokenizedPrompt not available, falling back to character-based estimation")
-
-	return estimateContextLength(request), false
-}
-
-// estimateContextLength estimates the context length from the request using character count.
-// This is a fallback when no tokenizer is configured.
-func estimateContextLength(request *scheduling.InferenceRequest) int {
-	if request == nil || request.Body == nil {
-		return 0
-	}
-	if request.Body.Generate != nil {
-		return len(request.Body.Generate.TokenIDs)
-	}
-	totalChars := 0
-
-	// Handle chat completions
-	if request.Body.ChatCompletions != nil {
-		for _, msg := range request.Body.ChatCompletions.Messages {
-			totalChars += len(msg.Content.Raw)
-		}
-	}
-
-	// Handle regular completions
-	if request.Body.Completions != nil {
-		totalChars += len(request.Body.Completions.Prompt.Raw)
-	}
-
-	// Convert characters to approximate token count
-	estimatedTokens := int(float64(totalChars) * charToTokenMultiplier)
-	return estimatedTokens
 }
 
 // parseContextRange parses a label value into a single context range.

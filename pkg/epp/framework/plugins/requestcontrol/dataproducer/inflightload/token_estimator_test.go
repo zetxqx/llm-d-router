@@ -58,8 +58,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						Prompt: fwkrh.Prompt{Raw: "123"},
 					},
 				},
+				RequestSizeBytes: 3,
 			},
-			expected: 3, // 3/4 (input tokens) + 3/4*1.5 (output tokens) = 3
+			expected: 3, // max(3/4, 1) = 1. 1 + round(1*1.5) = 3
 		},
 		{
 			name: "Completions Request",
@@ -69,8 +70,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						Prompt: fwkrh.Prompt{Raw: "Hello, world!"},
 					},
 				},
+				RequestSizeBytes: 13,
 			},
-			expected: 8, // 8/4 (input tokens) + 8/4*1.5 (output tokens) = 8
+			expected: 8, // max(13/4, 1) = 3. 3 + round(3*1.5) = 8
 		},
 		{
 			name: "Completions with empty prompt",
@@ -80,8 +82,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						Prompt: fwkrh.Prompt{},
 					},
 				},
+				RequestSizeBytes: 0,
 			},
-			expected: 3,
+			expected: 3, // max(0/4, 1) = 1. 1 + round(1*1.5) = 3
 		},
 		{
 			name: "Completions with exactly 4 characters",
@@ -91,8 +94,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						Prompt: fwkrh.Prompt{Raw: "1234"},
 					},
 				},
+				RequestSizeBytes: 4,
 			},
-			expected: 3,
+			expected: 3, // max(4/4, 1) = 1. 1 + round(1*1.5) = 3
 		},
 		{
 			name: "Chat Completions Request with Structured content",
@@ -114,8 +118,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						},
 					},
 				},
+				RequestSizeBytes: 26,
 			},
-			expected: 18,
+			expected: 15, // max(26/4, 1) = 6. 6 + round(6*1.5) = 15
 		},
 		{
 			name: "Chat Completions with Raw content",
@@ -132,8 +137,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						},
 					},
 				},
+				RequestSizeBytes: 21,
 			},
-			expected: 13,
+			expected: 13, // max(21/4, 1) = 5. 5 + round(5*1.5) = 13
 		},
 		{
 			name: "Chat Completions with multiple messages",
@@ -160,10 +166,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						},
 					},
 				},
+				RequestSizeBytes: 11,
 			},
-			// PromptText() joins messages with a trailing space separator ("Hi Hello " = 9 chars),
-			// so the estimate is higher than summing per-message lengths individually (7 chars).
-			expected: 8,
+			expected: 5, // max(11/4, 1) = 2. 2 + round(2*1.5) = 5
 		},
 		{
 			name: "Chat Completions with empty messages",
@@ -173,8 +178,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						Messages: []fwkrh.Message{},
 					},
 				},
+				RequestSizeBytes: 0,
 			},
-			expected: 3,
+			expected: 3, // max(0/4, 1) = 1. 1 + round(1*1.5) = 3
 		},
 		{
 			name: "Responses API with string input",
@@ -184,8 +190,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						Input: "Tell me a story about a brave knight.",
 					},
 				},
+				RequestSizeBytes: 37,
 			},
-			expected: 23,
+			expected: 23, // max(37/4, 1) = 9. 9 + round(9*1.5) = 23
 		},
 		{
 			name: "Responses API with structured input",
@@ -197,8 +204,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						},
 					},
 				},
+				RequestSizeBytes: 34,
 			},
-			expected: 23,
+			expected: 20, // max(34/4, 1) = 8. 8 + round(8*1.5) = 20
 		},
 		{
 			name: "Conversations API",
@@ -210,8 +218,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 						},
 					},
 				},
+				RequestSizeBytes: 55,
 			},
-			expected: 35,
+			expected: 33, // max(55/4, 1) = 13. 13 + round(13*1.5) = 33
 		},
 	}
 
@@ -223,10 +232,9 @@ func TestSimpleTokenEstimator_Estimate(t *testing.T) {
 	}
 }
 
-func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {
+func TestSimpleTokenEstimator_Estimate_CustomOutputRatio(t *testing.T) {
 	estimator := &SimpleTokenEstimator{
-		CharactersPerToken: 2.0,
-		OutputRatio:        2.0,
+		OutputRatio: 2.0,
 	}
 
 	testCases := []struct {
@@ -235,37 +243,16 @@ func TestSimpleTokenEstimator_Estimate_CustomConfig(t *testing.T) {
 		expected int64
 	}{
 		{
-			name: "Empty prompt with custom config",
+			name: "Request with 4 estimated input tokens",
 			request: &fwksched.InferenceRequest{
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{},
+						Prompt: fwkrh.Prompt{Raw: "1234567890123456"},
 					},
 				},
+				RequestSizeBytes: 16,
 			},
-			expected: 3,
-		},
-		{
-			name: "4 chars with custom config",
-			request: &fwksched.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "1234"},
-					},
-				},
-			},
-			expected: 6,
-		},
-		{
-			name: "More than 4 chars with custom config",
-			request: &fwksched.InferenceRequest{
-				Body: &fwkrh.InferenceRequestBody{
-					Completions: &fwkrh.CompletionsRequest{
-						Prompt: fwkrh.Prompt{Raw: "This is a longer message."},
-					},
-				},
-			},
-			expected: 39,
+			expected: 12, // 4 input. Output: 4 * 2.0 = 8. Total: 4 + 8 = 12
 		},
 	}
 

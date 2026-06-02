@@ -76,6 +76,30 @@ func (r *InferenceRequest) String() string {
 		r.RequestID, r.TargetModel, r.Body, r.Headers)
 }
 
+// EstimatedTokenLength returns the estimated token length for the request and a boolean indicating
+// whether the request is tokenized (derived from tokenized prompt or hint).
+// Returns 0, false if the request is nil, or if there is no body and RequestSizeBytes is 0.
+func (r *InferenceRequest) EstimatedTokenLength() (length int64, tokenized bool) {
+	if r == nil {
+		return 0, false
+	}
+	if r.Body != nil {
+		if r.Body.TokenizedPrompt != nil && len(r.Body.TokenizedPrompt.TokenIDs) > 0 {
+			return int64(len(r.Body.TokenizedPrompt.TokenIDs)), true
+		}
+		if hint := r.Body.InputTokenCountHint(); hint >= 0 {
+			return int64(hint), true
+		}
+	}
+	if r.RequestSizeBytes > 0 {
+		return max(int64(r.RequestSizeBytes)/4, 1), false
+	}
+	if r.Body != nil {
+		return 1, false
+	}
+	return 0, false
+}
+
 type Endpoint interface {
 	GetMetadata() *fwkdl.EndpointMetadata
 	GetMetrics() *fwkdl.Metrics

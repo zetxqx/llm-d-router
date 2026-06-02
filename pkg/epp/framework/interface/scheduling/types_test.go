@@ -191,3 +191,111 @@ func TestModalityAliases(t *testing.T) {
 	// These aliases exist for ergonomic re-export. Confirm the values line up.
 	assert.Equal(t, fwkrh.ModalityImage, ModalityImage)
 }
+
+func TestInferenceRequest_EstimatedTokenLength(t *testing.T) {
+	tests := []struct {
+		name              string
+		request           *InferenceRequest
+		expected          int64
+		expectedTokenized bool
+	}{
+		{
+			name: "TokenizedPrompt available",
+			request: &InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					TokenizedPrompt: &fwkrh.TokenizedPrompt{
+						TokenIDs: []uint32{1, 2, 3, 4},
+					},
+				},
+				RequestSizeBytes: 100, // should be ignored
+			},
+			expected:          4,
+			expectedTokenized: true,
+		},
+		{
+			name: "hint available (token inputs)",
+			request: &InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					TokenInputs: []fwkrh.TokenizedInput{
+						{TokenIDs: []uint32{1, 2, 3}},
+					},
+				},
+				RequestSizeBytes: 100, // should be ignored
+			},
+			expected:          3,
+			expectedTokenized: true,
+		},
+		{
+			name: "hint available (generate request)",
+			request: &InferenceRequest{
+				Body: &fwkrh.InferenceRequestBody{
+					Generate: &fwkrh.GenerateRequest{
+						TokenIDs: []uint32{1, 2, 3, 4, 5},
+					},
+				},
+				RequestSizeBytes: 100, // should be ignored
+			},
+			expected:          5,
+			expectedTokenized: true,
+		},
+		{
+			name: "hint not available, large request size",
+			request: &InferenceRequest{
+				Body:             &fwkrh.InferenceRequestBody{},
+				RequestSizeBytes: 100,
+			},
+			expected:          25,
+			expectedTokenized: false,
+		},
+		{
+			name: "hint not available, small request size (rounds to 1)",
+			request: &InferenceRequest{
+				Body:             &fwkrh.InferenceRequestBody{},
+				RequestSizeBytes: 2,
+			},
+			expected:          1,
+			expectedTokenized: false,
+		},
+		{
+			name: "hint not available, zero request size",
+			request: &InferenceRequest{
+				Body:             &fwkrh.InferenceRequestBody{},
+				RequestSizeBytes: 0,
+			},
+			expected:          1,
+			expectedTokenized: false,
+		},
+		{
+			name: "nil body, uses request size",
+			request: &InferenceRequest{
+				Body:             nil,
+				RequestSizeBytes: 80,
+			},
+			expected:          20,
+			expectedTokenized: false,
+		},
+		{
+			name: "nil body, zero request size",
+			request: &InferenceRequest{
+				Body:             nil,
+				RequestSizeBytes: 0,
+			},
+			expected:          0,
+			expectedTokenized: false,
+		},
+		{
+			name:              "nil request",
+			request:           nil,
+			expected:          0,
+			expectedTokenized: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, tokenized := tt.request.EstimatedTokenLength()
+			assert.Equal(t, tt.expected, result)
+			assert.Equal(t, tt.expectedTokenized, tokenized)
+		})
+	}
+}

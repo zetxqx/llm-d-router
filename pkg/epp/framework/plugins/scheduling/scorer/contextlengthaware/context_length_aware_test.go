@@ -350,6 +350,7 @@ func TestContextLengthAwareFallbackWithoutTokenizedPrompt(t *testing.T) {
 				Prompt: fwkrh.Prompt{Raw: prompt},
 			},
 		},
+		RequestSizeBytes: len(prompt),
 	}
 
 	filteredEndpoints := plugin.Filter(ctx, request, endpoints)

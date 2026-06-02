@@ -32,17 +32,14 @@ type TokenEstimator interface {
 	EstimateOutput(inputTokens int64) int64
 }
 
-// SimpleTokenEstimator estimates tokens from character count. tokens = characters / CharactersPerToken.
 type SimpleTokenEstimator struct {
-	CharactersPerToken float64
-	OutputRatio        float64
+	OutputRatio float64
 }
 
-// NewSimpleTokenEstimator returns a SimpleTokenEstimator with default 4.0 chars per token.
+// NewSimpleTokenEstimator returns a SimpleTokenEstimator with default output ratio.
 func NewSimpleTokenEstimator() TokenEstimator {
 	return &SimpleTokenEstimator{
-		CharactersPerToken: 4.0,
-		OutputRatio:        1.5,
+		OutputRatio: 1.5,
 	}
 }
 
@@ -63,22 +60,8 @@ func (e *SimpleTokenEstimator) EstimateInput(request *fwksched.InferenceRequest)
 	if request == nil {
 		return 0
 	}
-	// Prefer request body size when available: avoids PlainText() and reduces GC pressure.
-	switch {
-	case request.RequestSizeBytes > 0:
-		return max(int64(request.RequestSizeBytes)/4, 1)
-	case request.Body != nil:
-		hint := request.Body.InputTokenCountHint()
-		if hint >= 0 {
-			return int64(hint)
-		}
-		// Fallback: character count from prompt text across all API types
-		// (completions, chat/completions, responses, conversations).
-		chars := len(request.Body.PromptText())
-		return int64(math.Max(1, math.Round(float64(chars)/e.CharactersPerToken)))
-	default:
-		return 0
-	}
+	length, _ := request.EstimatedTokenLength()
+	return length
 }
 
 // EstimateOutput returns the estimated output token count given the input token count.

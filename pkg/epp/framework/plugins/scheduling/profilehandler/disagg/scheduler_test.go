@@ -104,8 +104,9 @@ func TestPDSchedule(t *testing.T) {
 		{
 			name: "no candidate endpoints",
 			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "any-model",
+				RequestID:        uuid.NewString(),
+				TargetModel:      "any-model",
+				RequestSizeBytes: 11,
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "12345678901"},
@@ -118,8 +119,9 @@ func TestPDSchedule(t *testing.T) {
 		{
 			name: "one decode endpoint, long prompt",
 			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
+				RequestID:        uuid.NewString(),
+				TargetModel:      "critical",
+				RequestSizeBytes: 11,
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "12345678901"},
@@ -133,8 +135,9 @@ func TestPDSchedule(t *testing.T) {
 		{
 			name: "one prefill endpoint, long prompt",
 			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
+				RequestID:        uuid.NewString(),
+				TargetModel:      "critical",
+				RequestSizeBytes: 11,
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "12345678901"},
@@ -148,8 +151,9 @@ func TestPDSchedule(t *testing.T) {
 		{
 			name: "1P1D - long prompt",
 			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
+				RequestID:        uuid.NewString(),
+				TargetModel:      "critical",
+				RequestSizeBytes: 11,
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "12345678906"},
@@ -164,8 +168,9 @@ func TestPDSchedule(t *testing.T) {
 		{
 			name: "1P1Dshort",
 			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
+				RequestID:        uuid.NewString(),
+				TargetModel:      "critical",
+				RequestSizeBytes: 5,
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "12345"},
@@ -181,8 +186,9 @@ func TestPDSchedule(t *testing.T) {
 		{
 			name: "TestRolesWithNoDecode",
 			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
+				RequestID:        uuid.NewString(),
+				TargetModel:      "critical",
+				RequestSizeBytes: 11,
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "12345678901"},
@@ -213,8 +219,9 @@ func TestPDSchedule(t *testing.T) {
 		{
 			name: "1P2D - long prompt",
 			req: &fwksched.InferenceRequest{
-				RequestID:   uuid.NewString(),
-				TargetModel: "critical",
+				RequestID:        uuid.NewString(),
+				TargetModel:      "critical",
+				RequestSizeBytes: 40,
 				Body: &fwkrh.InferenceRequestBody{
 					Completions: &fwkrh.CompletionsRequest{
 						Prompt: fwkrh.Prompt{Raw: "1234567890123456789012345678901234567890"},

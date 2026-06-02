@@ -109,11 +109,12 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 		logger.Error(nil, "prefix decider: endpoint is nil")
 		return false
 	}
-	inputTokens, err := getUserInputLenInTokens(request)
-	if err != nil {
-		logger.Error(err, "prefix decider: failed to get user input length in tokens")
+	if request == nil {
+		logger.Error(nil, "prefix decider: request is nil")
 		return false
 	}
+	length, _ := request.EstimatedTokenLength()
+	inputTokens := int(length)
 	if inputTokens < d.config.NonCachedTokens {
 		debugLogger.Info("Input is shorter than the nonCachedToken, no disaggregated PD")
 		return false
@@ -146,16 +147,4 @@ func (d *PrefixBasedPDDecider) disaggregate(ctx context.Context, request *schedu
 	}
 
 	return true
-}
-
-// getUserInputLenInTokens returns an estimated token count for the user input.
-func getUserInputLenInTokens(request *scheduling.InferenceRequest) (int, error) {
-	if request == nil || request.Body == nil {
-		return 0, errors.New("request or request body is nil")
-	}
-
-	if tokenCountHint := request.Body.InputTokenCountHint(); tokenCountHint >= 0 {
-		return tokenCountHint, nil
-	}
-	return len(request.Body.PromptText()) / AverageCharactersPerToken, nil
 }

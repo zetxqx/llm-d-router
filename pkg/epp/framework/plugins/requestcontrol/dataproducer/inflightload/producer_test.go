@@ -247,6 +247,7 @@ func makeTokenRequest(requestID, prompt string) *fwksched.InferenceRequest {
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{Prompt: fwkrh.Prompt{Raw: prompt}},
 		},
+		RequestSizeBytes: len(prompt),
 	}
 }
 

@@ -58,32 +58,43 @@ func makeRequestWithTokens(tokens int) *scheduling.InferenceRequest {
 }
 
 func completionsRequestWithPrompt(prompt fwkrh.Prompt) *scheduling.InferenceRequest {
-	return &scheduling.InferenceRequest{
+	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			Completions: &fwkrh.CompletionsRequest{
 				Prompt: prompt,
 			},
 		},
 	}
+	if prompt.Raw != "" {
+		req.RequestSizeBytes = len(prompt.Raw)
+	} else if len(prompt.Strings) > 0 {
+		req.RequestSizeBytes = len(strings.Join(prompt.Strings, " "))
+	}
+	return req
 }
 
 func embeddingsRequestWithInput(input fwkrh.EmbeddingsInput) *scheduling.InferenceRequest {
-	return &scheduling.InferenceRequest{
+	req := &scheduling.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
 			Embeddings: &fwkrh.EmbeddingsRequest{
 				Input: input,
 			},
 		},
 	}
+	if input.Raw != "" {
+		req.RequestSizeBytes = len(input.Raw)
+	} else if len(input.Strings) > 0 {
+		req.RequestSizeBytes = len(strings.Join(input.Strings, " "))
+	}
+	return req
 }
 
-func TestGetUserInputLenInTokens(t *testing.T) {
+func TestInferenceRequest_EstimatedTokenLength_Disagg(t *testing.T) {
 	tests := []struct {
-		name     string
-		req      *scheduling.InferenceRequest
-		wantMin  int // at least this many tokens
-		wantZero bool
-		want     int
+		name    string
+		req     *scheduling.InferenceRequest
+		wantMin int // at least this many tokens
+		want    int
 	}{
 		{
 			name:    "completions prompt",
@@ -96,9 +107,9 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 			wantMin: 1,
 		},
 		{
-			name:     "empty completions prompt",
-			req:      completionsRequest(""),
-			wantZero: true,
+			name:    "empty completions prompt",
+			req:     completionsRequest(""),
+			wantMin: 1,
 		},
 		{
 			name: "completions prompt array",
@@ -142,11 +153,9 @@ func TestGetUserInputLenInTokens(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tokens, err := getUserInputLenInTokens(tt.req)
-			assert.NoError(t, err)
+			length, _ := tt.req.EstimatedTokenLength()
+			tokens := int(length)
 			switch {
-			case tt.wantZero:
-				assert.Zero(t, tokens)
 			case tt.want > 0:
 				assert.Equal(t, tt.want, tokens)
 			default:
