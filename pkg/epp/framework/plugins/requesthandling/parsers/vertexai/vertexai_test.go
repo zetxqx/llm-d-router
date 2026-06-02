@@ -185,6 +185,14 @@ func TestParseRequest(t *testing.T) {
 				t.Fatalf("ParseRequest failed: %v", err)
 			}
 
+			if tc.wantResult != nil && tc.wantResult.Body != nil {
+				if tc.wantResult.Body.ChatCompletions != nil {
+					tc.wantResult.Body.OriginalRequestName = "ChatCompletions"
+				} else if tc.wantResult.Body.Responses != nil {
+					tc.wantResult.Body.OriginalRequestName = "Responses"
+				}
+			}
+
 			if diff := cmp.Diff(tc.wantResult, res, protocmp.Transform()); diff != "" {
 				t.Errorf("ParseResult mismatch (-want +got):\n%s", diff)
 			}
