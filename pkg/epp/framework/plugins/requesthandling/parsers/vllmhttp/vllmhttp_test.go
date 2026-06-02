@@ -208,13 +208,6 @@ func TestVllmHTTPParser_ParseRequest_Generate(t *testing.T) {
 			if got.Skip {
 				t.Errorf("ParseRequest() got.Skip = true, want false")
 			}
-			if tt.want != nil {
-				if tt.want.Generate != nil {
-					tt.want.OriginalRequestName = "Generate"
-					tt.want.Provider = "vllm-http"
-				}
-			}
-
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}

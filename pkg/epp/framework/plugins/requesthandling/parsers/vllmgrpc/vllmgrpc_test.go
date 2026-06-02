@@ -343,16 +343,6 @@ func TestVllmGRPCParser_ParseRequest(t *testing.T) {
 			if got.Skip != tt.wantSkip {
 				t.Errorf("got.Skip = %v, want %v", got.Skip, tt.wantSkip)
 			}
-
-			if tt.want != nil {
-				tt.want.Provider = "vllm-grpc"
-				if tt.want.Completions != nil {
-					tt.want.OriginalRequestName = "Completions"
-				} else if tt.want.Embeddings != nil {
-					tt.want.OriginalRequestName = "Embeddings"
-				}
-			}
-
 			if diff := cmp.Diff(tt.want, got.Body, protocmp.Transform()); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}

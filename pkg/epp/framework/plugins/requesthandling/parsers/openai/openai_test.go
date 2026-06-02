@@ -812,22 +812,6 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 			if got.Skip != false {
 				t.Errorf("ParseRequest() got.Skip = %v, want false", got.Skip)
 			}
-
-			if tt.want != nil {
-				tt.want.Provider = "openai"
-				if tt.want.ChatCompletions != nil {
-					tt.want.OriginalRequestName = "ChatCompletions"
-				} else if tt.want.Completions != nil {
-					tt.want.OriginalRequestName = "Completions"
-				} else if tt.want.Embeddings != nil {
-					tt.want.OriginalRequestName = "Embeddings"
-				} else if tt.want.Responses != nil {
-					tt.want.OriginalRequestName = "Responses"
-				} else if tt.want.Conversations != nil {
-					tt.want.OriginalRequestName = "Conversations"
-				}
-			}
-
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}

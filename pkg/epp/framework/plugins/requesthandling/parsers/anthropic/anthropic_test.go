@@ -436,11 +436,6 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				t.Errorf("ParseRequest() got.Skip = %v, want false", got.Skip)
 			}
 
-			if tt.want != nil {
-				tt.want.OriginalRequestName = "Messages"
-				tt.want.Provider = "anthropic"
-			}
-
 			if diff := cmp.Diff(tt.want, got.Body); diff != "" {
 				t.Errorf("ParseRequest() mismatch (-want +got):\n%s", diff)
 			}
