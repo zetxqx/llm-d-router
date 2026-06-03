@@ -18,7 +18,9 @@ package handlers
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
@@ -41,4 +43,58 @@ func (c *Config) String() string {
 // NewParsers returns the configured parsers.
 func NewParsers(config *Config) []fwkrh.Parser {
 	return config.Parsers
+}
+
+// ParserRouter handles the routing of incoming requests to the appropriate Parser.
+type ParserRouter struct {
+	routes         map[string]fwkrh.Parser
+	fallbackParser fwkrh.Parser
+}
+
+// NewParserRouter builds a central routing table from a list of active parsers.
+// The order of the input parsers determines the priority (first match wins for identical suffixes).
+func NewParserRouter(parsers []fwkrh.Parser) *ParserRouter {
+	router := &ParserRouter{
+		routes: make(map[string]fwkrh.Parser),
+	}
+
+	for _, parser := range parsers {
+		paths := parser.Match().Paths
+		if len(paths) == 0 {
+			// A parser with no paths acts as a fallback. Stop processing subsequent
+			// parsers once a fallback is registered, as it will capture all remaining traffic.
+			if router.fallbackParser == nil {
+				router.fallbackParser = parser
+			}
+			break
+		}
+		for _, suffix := range paths {
+			normalized := normalizeSuffix(suffix)
+			// First-wins priority for duplicate suffixes
+			if _, exists := router.routes[normalized]; !exists {
+				router.routes[normalized] = parser
+			}
+		}
+	}
+
+	return router
+}
+
+// Route resolves an incoming request path to the matching Parser using suffix matching.
+func (pr *ParserRouter) Route(path string) (fwkrh.Parser, error) {
+	for suffix, parser := range pr.routes {
+		if request.MatchPathSuffix(path, suffix) {
+			return parser, nil
+		}
+	}
+	if pr.fallbackParser != nil {
+		return pr.fallbackParser, nil
+	}
+
+	return nil, fmt.Errorf("no parser registered matching path suffix for: %s", path)
+}
+
+// normalizeSuffix cleans up a suffix by removing leading and trailing slashes.
+func normalizeSuffix(suffix string) string {
+	return strings.Trim(strings.TrimSpace(suffix), "/")
 }

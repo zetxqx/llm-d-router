@@ -505,13 +505,18 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 	}
 }
 
-func TestVllmGRPCParser_SupportedAppProtocols(t *testing.T) {
+func TestVllmGRPCParser_Match(t *testing.T) {
 	parser := NewVllmGRPCParser()
+	got := parser.Match()
+	want := fwkrh.Match{
+		Paths: []string{
+			vllmGeneratePath,
+			vllmEmbedPath,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
 
-	supported := parser.SupportedAppProtocols()
-	want := []v1.AppProtocol{v1.AppProtocolH2C}
-
-	if diff := cmp.Diff(want, supported); diff != "" {
-		t.Errorf("SupportedAppProtocols() mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
 	}
 }

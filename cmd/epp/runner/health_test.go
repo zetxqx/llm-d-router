@@ -28,6 +28,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
+	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
 // Mock Datastore
@@ -51,8 +52,10 @@ type mockSupporter struct {
 	protocols []v1.AppProtocol
 }
 
-func (m *mockSupporter) SupportedAppProtocols() []v1.AppProtocol {
-	return m.protocols
+func (m *mockSupporter) Match() fwkrh.Match {
+	return fwkrh.Match{
+		Protocols: m.protocols,
+	}
 }
 
 func TestHealthServer_Check(t *testing.T) {

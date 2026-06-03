@@ -28,7 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	extv1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	"github.com/llm-d/llm-d-router/apix/v1alpha2"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -415,9 +414,11 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
 	return nil, errors.New("sentinel error for mock parser")
 }
-
-func (m *mockParser) SupportedAppProtocols() []extv1.AppProtocol {
-	return nil
+func (m *mockParser) Match() fwkrh.Match {
+	return fwkrh.Match{
+		Paths:     []string{"completions"},
+		Protocols: nil,
+	}
 }
 
 func (m *mockParser) TypedName() fwkplugin.TypedName {

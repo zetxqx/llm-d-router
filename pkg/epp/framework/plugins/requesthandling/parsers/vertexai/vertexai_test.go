@@ -290,9 +290,18 @@ func TestVertexAIParser_Metadata(t *testing.T) {
 		t.Errorf("Expected name %s, got %s", VertexAIParserType, typedName.Name)
 	}
 
-	protocols := parser.SupportedAppProtocols()
-	if len(protocols) != 1 || protocols[0] != v1.AppProtocolH2C {
-		t.Errorf("Expected protocols [h2c], got %v", protocols)
+	got := parser.Match()
+	want := fwkrh.Match{
+		Paths: []string{
+			chatCompletionsMethod,
+			streamRawPredictServiceMethod,
+			rawPredictServiceMethod,
+		},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C},
+	}
+
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
 	}
 }
 

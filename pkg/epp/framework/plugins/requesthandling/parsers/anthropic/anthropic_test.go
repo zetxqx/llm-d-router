@@ -611,12 +611,15 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 	}
 }
 
-func TestAnthropicParser_SupportedAppProtocols(t *testing.T) {
+func TestAnthropicParser_Match(t *testing.T) {
 	parser := NewAnthropicParser()
-	supported := parser.SupportedAppProtocols()
-	want := []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP}
+	got := parser.Match()
+	want := fwkrh.Match{
+		Paths:     []string{messagesAPI},
+		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
+	}
 
-	if diff := cmp.Diff(want, supported); diff != "" {
-		t.Errorf("SupportedAppProtocols() mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
 	}
 }
