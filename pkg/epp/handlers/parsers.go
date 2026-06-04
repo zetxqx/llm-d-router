@@ -24,71 +24,61 @@ import (
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 )
 
-// Config holds the configuration for the Parser.
-type Config struct {
-	Parsers []fwkrh.Parser
-}
-
-func (c *Config) String() string {
-	if c == nil {
-		return "<nil>"
-	}
-	// Define a local type definition to prevent infinite recursion when calling Sprintf("%+v").
-	// A new type definition inherits the struct fields but does not copy its methods,
-	// bypassing the Stringer check and allowing a safe reflection-based field dump.
-	type temp Config
-	return fmt.Sprintf("%+v", temp(*c))
-}
-
-// NewParsers returns the configured parsers.
-func NewParsers(config *Config) []fwkrh.Parser {
-	return config.Parsers
-}
-
-// ParserRouter handles the routing of incoming requests to the appropriate Parser.
-type ParserRouter struct {
+// ParserDispatcher handles the routing of incoming requests to the appropriate Parser.
+type ParserDispatcher struct {
 	routes         map[string]fwkrh.Parser
 	fallbackParser fwkrh.Parser
+	parsers        []fwkrh.Parser
 }
 
-// NewParserRouter builds a central routing table from a list of active parsers.
+// NewParserDispatcher builds a central routing table from a list of active parsers.
 // The order of the input parsers determines the priority (first match wins for identical suffixes).
-func NewParserRouter(parsers []fwkrh.Parser) *ParserRouter {
-	router := &ParserRouter{
+func NewParserDispatcher(parsers []fwkrh.Parser) *ParserDispatcher {
+	dispatcher := &ParserDispatcher{
 		routes: make(map[string]fwkrh.Parser),
 	}
-
+	seen := make(map[fwkrh.Parser]bool)
 	for _, parser := range parsers {
-		paths := parser.Match().Paths
+		if !seen[parser] {
+			seen[parser] = true
+			dispatcher.parsers = append(dispatcher.parsers, parser)
+		}
+
+		paths := parser.Claims().Paths
 		if len(paths) == 0 {
 			// A parser with no paths acts as a fallback. Stop processing subsequent
 			// parsers once a fallback is registered, as it will capture all remaining traffic.
-			if router.fallbackParser == nil {
-				router.fallbackParser = parser
+			if dispatcher.fallbackParser == nil {
+				dispatcher.fallbackParser = parser
 			}
 			break
 		}
 		for _, suffix := range paths {
 			normalized := normalizeSuffix(suffix)
 			// First-wins priority for duplicate suffixes
-			if _, exists := router.routes[normalized]; !exists {
-				router.routes[normalized] = parser
+			if _, exists := dispatcher.routes[normalized]; !exists {
+				dispatcher.routes[normalized] = parser
 			}
 		}
 	}
 
-	return router
+	return dispatcher
 }
 
-// Route resolves an incoming request path to the matching Parser using suffix matching.
-func (pr *ParserRouter) Route(path string) (fwkrh.Parser, error) {
-	for suffix, parser := range pr.routes {
+// Parsers returns all unique active parsers registered in the dispatcher.
+func (pd *ParserDispatcher) Parsers() []fwkrh.Parser {
+	return pd.parsers
+}
+
+// Dispatch resolves an incoming request path to the matching Parser using suffix matching.
+func (pd *ParserDispatcher) Dispatch(path string) (fwkrh.Parser, error) {
+	for suffix, parser := range pd.routes {
 		if request.MatchPathSuffix(path, suffix) {
 			return parser, nil
 		}
 	}
-	if pr.fallbackParser != nil {
-		return pr.fallbackParser, nil
+	if pd.fallbackParser != nil {
+		return pd.fallbackParser, nil
 	}
 
 	return nil, fmt.Errorf("no parser registered matching path suffix for: %s", path)

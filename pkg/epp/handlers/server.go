@@ -59,11 +59,11 @@ type EvictChannelLookup interface {
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parsers []fwkrh.Parser, maxPoolBufferSize int) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parserDispatcher *ParserDispatcher, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
 		director:          director,
 		datastore:         datastore,
-		parserRouter:      NewParserRouter(parsers),
+		parserDispatcher:  parserDispatcher,
 		maxPoolBufferSize: maxPoolBufferSize,
 		bufferPool: sync.Pool{
 			New: func() any {
@@ -94,7 +94,7 @@ type Datastore interface {
 type StreamingServer struct {
 	datastore         Datastore
 	director          Director
-	parserRouter      *ParserRouter
+	parserDispatcher  *ParserDispatcher
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
@@ -187,7 +187,7 @@ func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *Reques
 		headers = reqCtx.Request.Headers
 	}
 	path := fwkrequest.GetRequestPath(headers)
-	resolvedParser, err := s.parserRouter.Route(path)
+	resolvedParser, err := s.parserDispatcher.Dispatch(path)
 	if err != nil {
 		logger.Error(err, "Error resolving parser for path", "path", path)
 		return nil, err

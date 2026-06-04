@@ -74,8 +74,8 @@ func (p *VllmGRPCParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *VllmGRPCParser) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (p *VllmGRPCParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Paths: []string{
 			vllmGeneratePath,
 			vllmEmbedPath,

@@ -53,8 +53,8 @@ func (p *PassthroughParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *PassthroughParser) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (p *PassthroughParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Paths:     nil,
 		Protocols: []v1.AppProtocol{},
 	}

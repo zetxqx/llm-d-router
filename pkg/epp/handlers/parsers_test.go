@@ -33,8 +33,8 @@ type testParser struct {
 func (tp *testParser) TypedName() fwkplugin.TypedName {
 	return fwkplugin.TypedName{Type: tp.name, Name: tp.name}
 }
-func (tp *testParser) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (tp *testParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Paths:     tp.paths,
 		Protocols: nil,
 	}
@@ -46,11 +46,11 @@ func (tp *testParser) ParseResponse(ctx context.Context, body []byte, headers ma
 	return nil, nil //nolint:nilnil
 }
 
-func TestParserRouter(t *testing.T) {
+func TestParserDispatcher(t *testing.T) {
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions", "v1/completions"}}
 	anthropic := &testParser{name: "anthropic", paths: []string{"v1/messages"}}
 	vertex := &testParser{name: "vertex", paths: []string{"PredictionService/ChatCompletions"}}
-	router := NewParserRouter([]fwkrh.Parser{openai, anthropic, vertex})
+	dispatcher := NewParserDispatcher([]fwkrh.Parser{openai, anthropic, vertex})
 
 	tests := []struct {
 		name        string
@@ -92,29 +92,29 @@ func TestParserRouter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := router.Route(tt.requestPath)
+			parser, err := dispatcher.Dispatch(tt.requestPath)
 			if (err != nil) != tt.expectError {
-				t.Errorf("Route(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
+				t.Errorf("Dispatch(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
 				return
 			}
 			if tt.expectError {
 				return
 			}
 			if parser.TypedName().Name != tt.wantParser {
-				t.Errorf("Route(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
+				t.Errorf("Dispatch(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
 			}
 		})
 	}
 }
 
-func TestParserRouterPriority(t *testing.T) {
+func TestParserDispatcherPriority(t *testing.T) {
 	// Both plugins claim `v1/chat/completions`
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions"}}
 	custom := &testParser{name: "custom", paths: []string{"v1/chat/completions"}}
 
 	// 1. OpenAI configured first
-	router1 := NewParserRouter([]fwkrh.Parser{openai, custom})
-	parser1, err := router1.Route("/v1/chat/completions")
+	dispatcher1 := NewParserDispatcher([]fwkrh.Parser{openai, custom})
+	parser1, err := dispatcher1.Dispatch("/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,8 +123,8 @@ func TestParserRouterPriority(t *testing.T) {
 	}
 
 	// 2. Custom configured first
-	router2 := NewParserRouter([]fwkrh.Parser{custom, openai})
-	parser2, err := router2.Route("/v1/chat/completions")
+	dispatcher2 := NewParserDispatcher([]fwkrh.Parser{custom, openai})
+	parser2, err := dispatcher2.Dispatch("/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,10 +133,10 @@ func TestParserRouterPriority(t *testing.T) {
 	}
 }
 
-func TestParserRouterWithWildcard(t *testing.T) {
+func TestParserDispatcherWithWildcard(t *testing.T) {
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions", "v1/completions"}}
 	wildcard := &testParser{name: "wildcard", paths: nil}
-	router := NewParserRouter([]fwkrh.Parser{openai, wildcard})
+	dispatcher := NewParserDispatcher([]fwkrh.Parser{openai, wildcard})
 
 	tests := []struct {
 		name        string
@@ -158,16 +158,16 @@ func TestParserRouterWithWildcard(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := router.Route(tt.requestPath)
+			parser, err := dispatcher.Dispatch(tt.requestPath)
 			if (err != nil) != tt.expectError {
-				t.Errorf("Route(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
+				t.Errorf("Dispatch(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
 				return
 			}
 			if tt.expectError {
 				return
 			}
 			if parser.TypedName().Name != tt.wantParser {
-				t.Errorf("Route(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
+				t.Errorf("Dispatch(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
 			}
 		})
 	}

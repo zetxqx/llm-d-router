@@ -83,8 +83,8 @@ func (p *OpenAIParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *OpenAIParser) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (p *OpenAIParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Paths: []string{
 			chatCompletionsAPI,
 			completionsAPI,

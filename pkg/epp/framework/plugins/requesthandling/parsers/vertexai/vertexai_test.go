@@ -290,8 +290,8 @@ func TestVertexAIParser_Metadata(t *testing.T) {
 		t.Errorf("Expected name %s, got %s", VertexAIParserType, typedName.Name)
 	}
 
-	got := parser.Match()
-	want := fwkrh.Match{
+	got := parser.Claims()
+	want := fwkrh.Claims{
 		Paths: []string{
 			chatCompletionsMethod,
 			streamRawPredictServiceMethod,
@@ -301,7 +301,7 @@ func TestVertexAIParser_Metadata(t *testing.T) {
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }
 

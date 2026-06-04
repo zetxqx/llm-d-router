@@ -1057,10 +1057,10 @@ func TestOpenAIParser_ParseResponse_Streaming(t *testing.T) {
 	}
 }
 
-func TestOpenAIParser_Match(t *testing.T) {
+func TestOpenAIParser_Claims(t *testing.T) {
 	parser := NewOpenAIParser()
-	got := parser.Match()
-	want := fwkrh.Match{
+	got := parser.Claims()
+	want := fwkrh.Claims{
 		Paths: []string{
 			chatCompletionsAPI,
 			completionsAPI,
@@ -1072,7 +1072,7 @@ func TestOpenAIParser_Match(t *testing.T) {
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }
 

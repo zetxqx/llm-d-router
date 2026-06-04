@@ -82,8 +82,8 @@ func (p *VertexAIParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *VertexAIParser) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (p *VertexAIParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Paths: []string{
 			chatCompletionsMethod,
 			streamRawPredictServiceMethod,

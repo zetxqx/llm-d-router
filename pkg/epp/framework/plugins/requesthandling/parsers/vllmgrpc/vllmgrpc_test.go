@@ -505,10 +505,10 @@ func TestVllmGRPCParser_ParseResponse(t *testing.T) {
 	}
 }
 
-func TestVllmGRPCParser_Match(t *testing.T) {
+func TestVllmGRPCParser_Claims(t *testing.T) {
 	parser := NewVllmGRPCParser()
-	got := parser.Match()
-	want := fwkrh.Match{
+	got := parser.Claims()
+	want := fwkrh.Claims{
 		Paths: []string{
 			vllmGeneratePath,
 			vllmEmbedPath,
@@ -517,6 +517,6 @@ func TestVllmGRPCParser_Match(t *testing.T) {
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }

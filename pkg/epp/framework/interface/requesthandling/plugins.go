@@ -43,12 +43,12 @@ type Parser interface {
 	// buffered response body and 'endOfStream' set to true.
 	ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*ParsedResponse, error)
 
-	// Match returns the matching criteria (paths and protocols) for this parser.
-	Match() Match
+	// Claims returns the paths and protocols claimed by this parser.
+	Claims() Claims
 }
 
-// Match defines the matching criteria for a parser.
-type Match struct {
+// Claims defines the matching criteria for a parser.
+type Claims struct {
 	Paths     []string         // path patterns this parser claims (e.g., "chat/completions")
 	Protocols []v1.AppProtocol // protocols this parser supports (e.g., "h2c")
 }

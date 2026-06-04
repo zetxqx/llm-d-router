@@ -32,7 +32,7 @@ type Config struct {
 	SaturationDetector fwkfc.SaturationDetector
 	DataConfig         *datalayer.Config
 	FlowControlConfig  *flowcontrol.Config
-	ParserConfig       *handlers.Config
+	ParserDispatcher   *handlers.ParserDispatcher
 }
 
 func (c *Config) String() string {

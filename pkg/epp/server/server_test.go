@@ -134,7 +134,7 @@ func runStreamingTest(t *testing.T, streamInRequest bool, streamingResponse bool
 	director := &testDirector{}
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, []fwkrh.Parser{openai.NewOpenAIParser()}, 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserDispatcher([]fwkrh.Parser{openai.NewOpenAIParser()}), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -414,8 +414,8 @@ func (m *mockParser) ParseRequest(ctx context.Context, body []byte, headers map[
 func (m *mockParser) ParseResponse(ctx context.Context, body []byte, headers map[string]string, endofStream bool) (*fwkrh.ParsedResponse, error) {
 	return nil, errors.New("sentinel error for mock parser")
 }
-func (m *mockParser) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (m *mockParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Paths:     []string{"completions"},
 		Protocols: nil,
 	}
@@ -436,7 +436,7 @@ func TestServer_Skip(t *testing.T) {
 
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
-	streamingServer := handlers.NewStreamingServer(ds, director, []fwkrh.Parser{mockPar}, 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserDispatcher([]fwkrh.Parser{mockPar}), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)
@@ -513,7 +513,7 @@ func TestServer_GRPCReceiveLimit(t *testing.T) {
 	ctx, cancel, ds := igwtestutils.PrepareForTestStreamingServer(t, []*v1alpha2.InferenceObjective{model},
 		[]*v1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: podName}}}, "test-pool1", namespace, poolPort)
 
-	streamingServer := handlers.NewStreamingServer(ds, director, []fwkrh.Parser{openai.NewOpenAIParser()}, 0)
+	streamingServer := handlers.NewStreamingServer(ds, director, handlers.NewParserDispatcher([]fwkrh.Parser{openai.NewOpenAIParser()}), 0)
 
 	testListener, errChan := igwtestutils.SetupTestStreamingServer(ctx, t, streamingServer)
 	process, conn := igwtestutils.GetStreamingServerClient(ctx, t)

@@ -83,15 +83,15 @@ func TestPassthroughParser_ParseResponse(t *testing.T) {
 	}
 }
 
-func TestPassthroughParser_Match(t *testing.T) {
+func TestPassthroughParser_Claims(t *testing.T) {
 	parser := NewPassthroughParser()
-	got := parser.Match()
-	want := fwkrh.Match{
+	got := parser.Claims()
+	want := fwkrh.Claims{
 		Paths:     nil,
 		Protocols: []v1.AppProtocol{},
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }

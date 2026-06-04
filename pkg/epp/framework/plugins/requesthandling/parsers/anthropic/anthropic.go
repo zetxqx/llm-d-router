@@ -61,8 +61,8 @@ func (p *AnthropicParser) TypedName() fwkplugin.TypedName {
 	return p.typedName
 }
 
-func (p *AnthropicParser) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (p *AnthropicParser) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Paths:     []string{messagesAPI},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}

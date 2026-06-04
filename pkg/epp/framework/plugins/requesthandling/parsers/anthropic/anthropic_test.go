@@ -611,15 +611,15 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 	}
 }
 
-func TestAnthropicParser_Match(t *testing.T) {
+func TestAnthropicParser_Claims(t *testing.T) {
 	parser := NewAnthropicParser()
-	got := parser.Match()
-	want := fwkrh.Match{
+	got := parser.Claims()
+	want := fwkrh.Claims{
 		Paths:     []string{messagesAPI},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -52,8 +52,8 @@ type mockSupporter struct {
 	protocols []v1.AppProtocol
 }
 
-func (m *mockSupporter) Match() fwkrh.Match {
-	return fwkrh.Match{
+func (m *mockSupporter) Claims() fwkrh.Claims {
+	return fwkrh.Claims{
 		Protocols: m.protocols,
 	}
 }

@@ -273,19 +273,19 @@ func TestVllmHTTPParser_DelegatesToOpenAI(t *testing.T) {
 	}
 }
 
-func TestVllmHTTPParser_Match(t *testing.T) {
+func TestVllmHTTPParser_Claims(t *testing.T) {
 	parser := NewVllmHTTPParser()
-	got := parser.Match()
-	openaiMatch := parser.openai.Match()
-	wantPaths := make([]string, 0, 1+len(openaiMatch.Paths))
+	got := parser.Claims()
+	openaiClaims := parser.openai.Claims()
+	wantPaths := make([]string, 0, 1+len(openaiClaims.Paths))
 	wantPaths = append(wantPaths, generatePathSuffix)
-	wantPaths = append(wantPaths, openaiMatch.Paths...)
-	want := fwkrh.Match{
+	wantPaths = append(wantPaths, openaiClaims.Paths...)
+	want := fwkrh.Claims{
 		Paths:     wantPaths,
-		Protocols: openaiMatch.Protocols,
+		Protocols: openaiClaims.Protocols,
 	}
 
 	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Match() mismatch (-want +got):\n%s", diff)
+		t.Errorf("Claims() mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -81,14 +81,14 @@ func (p *VllmHTTPParser) WithName(name string) *VllmHTTPParser {
 	return p
 }
 
-func (p *VllmHTTPParser) Match() fwkrh.Match {
-	openaiMatch := p.openai.Match()
-	paths := make([]string, 0, 1+len(openaiMatch.Paths))
+func (p *VllmHTTPParser) Claims() fwkrh.Claims {
+	openaiClaims := p.openai.Claims()
+	paths := make([]string, 0, 1+len(openaiClaims.Paths))
 	paths = append(paths, generatePathSuffix)
-	paths = append(paths, openaiMatch.Paths...)
-	return fwkrh.Match{
+	paths = append(paths, openaiClaims.Paths...)
+	return fwkrh.Claims{
 		Paths:     paths,
-		Protocols: openaiMatch.Protocols,
+		Protocols: openaiClaims.Protocols,
 	}
 }
 

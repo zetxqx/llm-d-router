@@ -33,7 +33,7 @@ import (
 )
 
 type appProtocolSupporter interface {
-	Match() fwkrh.Match
+	Claims() fwkrh.Claims
 }
 
 type healthServer struct {
@@ -120,7 +120,7 @@ func (s *healthServer) checkProtocolSupport(isLive bool) bool {
 		if supporter == nil {
 			continue
 		}
-		supported := supporter.Match().Protocols
+		supported := supporter.Claims().Protocols
 		if len(supported) == 0 {
 			continue
 		}
