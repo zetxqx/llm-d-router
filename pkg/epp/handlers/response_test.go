@@ -188,7 +188,7 @@ func TestHandleResponseBody(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parserDispatcher: NewParserDispatcher([]fwkrh.Parser{openai.NewOpenAIParser()}),
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}),
 			}
 			server.director = &mockDirector{}
 			reqCtx := test.reqCtx
@@ -247,7 +247,7 @@ func TestHandleStreamedResponseBody(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parserDispatcher: NewParserDispatcher([]fwkrh.Parser{openai.NewOpenAIParser()}),
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}),
 			}
 			server.director = &mockDirector{}
 			reqCtx := &RequestContext{
@@ -318,8 +318,8 @@ func TestHandleResponseBodyModelStreaming_TokenAccumulation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parserDispatcher: NewParserDispatcher([]fwkrh.Parser{openai.NewOpenAIParser()}),
-				director:         &mockDirector{},
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}),
+				director:       &mockDirector{},
 			}
 			reqCtx := &RequestContext{
 				Response: &Response{
@@ -474,8 +474,8 @@ func TestResponseSizeAccumulation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := &StreamingServer{
-				parserDispatcher: NewParserDispatcher([]fwkrh.Parser{openai.NewOpenAIParser()}),
-				director:         &mockDirector{},
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}),
+				director:       &mockDirector{},
 			}
 			reqCtx := &RequestContext{
 				Response: &Response{

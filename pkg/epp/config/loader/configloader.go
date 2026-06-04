@@ -180,9 +180,9 @@ func InstantiateAndConfigure(
 		}
 	}
 
-	parserDispatcher, err := buildParserDispatcher(rawConfig.RequestHandler.Parsers, handle)
+	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle)
 	if err != nil {
-		return nil, fmt.Errorf("parser dispatcher build failed: %w", err)
+		return nil, fmt.Errorf("parser registry build failed: %w", err)
 	}
 
 	plugin, ok := handle.GetAllPluginsWithNames()[rawConfig.FlowControl.SaturationDetector.PluginRef]
@@ -199,7 +199,7 @@ func InstantiateAndConfigure(
 		SaturationDetector: saturationDetector,
 		DataConfig:         dataConfig,
 		FlowControlConfig:  flowControlConfig,
-		ParserDispatcher:   parserDispatcher,
+		ParserRegistry:     parserRegistry,
 	}, nil
 }
 
@@ -307,7 +307,7 @@ func loadFeatureConfig(gates configapi.FeatureGates) map[string]bool {
 	return config
 }
 
-func buildParserDispatcher(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle) (*handlers.ParserDispatcher, error) {
+func buildParserRegistry(rawParserConfigs []configapi.ParserConfig, handle fwkplugin.Handle) (*handlers.ParserRegistry, error) {
 	if len(rawParserConfigs) == 0 {
 		return nil, errors.New("no parsers configured")
 	}
@@ -324,7 +324,7 @@ func buildParserDispatcher(rawParserConfigs []configapi.ParserConfig, handle fwk
 		}
 		parsers = append(parsers, v)
 	}
-	return handlers.NewParserDispatcher(parsers), nil
+	return handlers.NewParserRegistry(parsers), nil
 }
 
 func buildDataLayerConfig(rawDataConfig *configapi.DataLayerConfig, handle fwkplugin.Handle) (*datalayer.Config, error) {

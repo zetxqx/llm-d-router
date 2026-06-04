@@ -22,63 +22,80 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/common/request"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// ParserDispatcher handles the routing of incoming requests to the appropriate Parser.
-type ParserDispatcher struct {
-	routes         map[string]fwkrh.Parser
+type parserEntry struct {
+	parser          fwkrh.Parser
+	normalizedPaths []string
+}
+
+// ParserRegistry handles the routing of incoming requests to the appropriate Parser.
+type ParserRegistry struct {
+	entries        []parserEntry
 	fallbackParser fwkrh.Parser
 	parsers        []fwkrh.Parser
 }
 
-// NewParserDispatcher builds a central routing table from a list of active parsers.
-// The order of the input parsers determines the priority (first match wins for identical suffixes).
-func NewParserDispatcher(parsers []fwkrh.Parser) *ParserDispatcher {
-	dispatcher := &ParserDispatcher{
-		routes: make(map[string]fwkrh.Parser),
-	}
-	seen := make(map[fwkrh.Parser]bool)
-	for _, parser := range parsers {
-		if !seen[parser] {
-			seen[parser] = true
-			dispatcher.parsers = append(dispatcher.parsers, parser)
-		}
+// NewParserRegistry builds a central routing table from a list of active parsers.
+// The order of the input parsers determines the priority (first match wins).
+func NewParserRegistry(parsers []fwkrh.Parser) *ParserRegistry {
+	registry := &ParserRegistry{}
+	seenTypes := make(map[string]bool)
+	logger := log.Log.WithName("ParserRegistry")
 
+	for i, parser := range parsers {
 		paths := parser.Claims().Paths
+		typeName := parser.TypedName().Type
 		if len(paths) == 0 {
 			// A parser with no paths acts as a fallback. Stop processing subsequent
 			// parsers once a fallback is registered, as it will capture all remaining traffic.
-			if dispatcher.fallbackParser == nil {
-				dispatcher.fallbackParser = parser
+			registry.fallbackParser = parser
+			if !seenTypes[typeName] {
+				seenTypes[typeName] = true
+				registry.parsers = append(registry.parsers, parser)
+			} else {
+				logger.Info("Parser type is already registered, skipping duplicate type configuration", "type", typeName, "parser", parser.TypedName().Name)
+			}
+			for _, skipped := range parsers[i+1:] {
+				logger.Info("Parser is skipped because it is configured after fallback parser", "skippedParser", skipped.TypedName().Name, "fallbackParser", parser.TypedName().Name)
 			}
 			break
 		}
-		for _, suffix := range paths {
-			normalized := normalizeSuffix(suffix)
-			// First-wins priority for duplicate suffixes
-			if _, exists := dispatcher.routes[normalized]; !exists {
-				dispatcher.routes[normalized] = parser
+		if !seenTypes[typeName] {
+			seenTypes[typeName] = true
+			registry.parsers = append(registry.parsers, parser)
+			normalizedPaths := make([]string, 0, len(paths))
+			for _, suffix := range paths {
+				normalizedPaths = append(normalizedPaths, normalizeSuffix(suffix))
+			}
+			registry.entries = append(registry.entries, parserEntry{
+				parser:          parser,
+				normalizedPaths: normalizedPaths,
+			})
+		} else {
+			logger.Info("Parser type is already registered, skipping duplicate type configuration", "type", typeName, "parser", parser.TypedName().Name)
+		}
+	}
+	return registry
+}
+
+// Parsers returns all unique active parsers registered in the registry.
+func (pr *ParserRegistry) Parsers() []fwkrh.Parser {
+	return pr.parsers
+}
+
+// Resolve resolves an incoming request path to the matching Parser using suffix matching.
+func (pr *ParserRegistry) Resolve(path string) (fwkrh.Parser, error) {
+	for _, entry := range pr.entries {
+		for _, suffix := range entry.normalizedPaths {
+			if request.MatchPathSuffix(path, suffix) {
+				return entry.parser, nil
 			}
 		}
 	}
-
-	return dispatcher
-}
-
-// Parsers returns all unique active parsers registered in the dispatcher.
-func (pd *ParserDispatcher) Parsers() []fwkrh.Parser {
-	return pd.parsers
-}
-
-// Dispatch resolves an incoming request path to the matching Parser using suffix matching.
-func (pd *ParserDispatcher) Dispatch(path string) (fwkrh.Parser, error) {
-	for suffix, parser := range pd.routes {
-		if request.MatchPathSuffix(path, suffix) {
-			return parser, nil
-		}
-	}
-	if pd.fallbackParser != nil {
-		return pd.fallbackParser, nil
+	if pr.fallbackParser != nil {
+		return pr.fallbackParser, nil
 	}
 
 	return nil, fmt.Errorf("no parser registered matching path suffix for: %s", path)

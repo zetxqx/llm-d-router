@@ -59,11 +59,11 @@ type EvictChannelLookup interface {
 	Deregister(requestID string)
 }
 
-func NewStreamingServer(datastore Datastore, director Director, parserDispatcher *ParserDispatcher, maxPoolBufferSize int) *StreamingServer {
+func NewStreamingServer(datastore Datastore, director Director, parserRegistry *ParserRegistry, maxPoolBufferSize int) *StreamingServer {
 	return &StreamingServer{
 		director:          director,
 		datastore:         datastore,
-		parserDispatcher:  parserDispatcher,
+		parserRegistry:    parserRegistry,
 		maxPoolBufferSize: maxPoolBufferSize,
 		bufferPool: sync.Pool{
 			New: func() any {
@@ -94,7 +94,7 @@ type Datastore interface {
 type StreamingServer struct {
 	datastore         Datastore
 	director          Director
-	parserDispatcher  *ParserDispatcher
+	parserRegistry    *ParserRegistry
 	evictionLookup    EvictChannelLookup // optional, set for eviction support
 	bufferPool        sync.Pool
 	maxPoolBufferSize int
@@ -122,7 +122,7 @@ type RequestContext struct {
 	ResponseStatusCode        string
 	RequestRunning            bool
 	Request                   *Request
-	ResolvedParser            fwkrh.Parser
+	Parser                    fwkrh.Parser
 
 	SchedulingRequest *fwksched.InferenceRequest
 
@@ -177,8 +177,8 @@ type recvResult struct {
 }
 
 func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *RequestContext) (fwkrh.Parser, error) {
-	if reqCtx.ResolvedParser != nil {
-		return reqCtx.ResolvedParser, nil
+	if reqCtx.Parser != nil {
+		return reqCtx.Parser, nil
 	}
 
 	logger := log.FromContext(ctx)
@@ -187,14 +187,14 @@ func (s *StreamingServer) getOrResolveParser(ctx context.Context, reqCtx *Reques
 		headers = reqCtx.Request.Headers
 	}
 	path := fwkrequest.GetRequestPath(headers)
-	resolvedParser, err := s.parserDispatcher.Dispatch(path)
+	parser, err := s.parserRegistry.Resolve(path)
 	if err != nil {
 		logger.Error(err, "Error resolving parser for path", "path", path)
 		return nil, err
 	}
 
-	reqCtx.ResolvedParser = resolvedParser
-	return resolvedParser, nil
+	reqCtx.Parser = parser
+	return parser, nil
 }
 
 func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {

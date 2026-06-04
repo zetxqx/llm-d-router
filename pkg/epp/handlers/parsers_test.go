@@ -46,11 +46,11 @@ func (tp *testParser) ParseResponse(ctx context.Context, body []byte, headers ma
 	return nil, nil //nolint:nilnil
 }
 
-func TestParserDispatcher(t *testing.T) {
+func TestParserRegistry(t *testing.T) {
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions", "v1/completions"}}
 	anthropic := &testParser{name: "anthropic", paths: []string{"v1/messages"}}
 	vertex := &testParser{name: "vertex", paths: []string{"PredictionService/ChatCompletions"}}
-	dispatcher := NewParserDispatcher([]fwkrh.Parser{openai, anthropic, vertex})
+	registry := NewParserRegistry([]fwkrh.Parser{openai, anthropic, vertex})
 
 	tests := []struct {
 		name        string
@@ -92,29 +92,29 @@ func TestParserDispatcher(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := dispatcher.Dispatch(tt.requestPath)
+			parser, err := registry.Resolve(tt.requestPath)
 			if (err != nil) != tt.expectError {
-				t.Errorf("Dispatch(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
+				t.Errorf("Resolve(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
 				return
 			}
 			if tt.expectError {
 				return
 			}
 			if parser.TypedName().Name != tt.wantParser {
-				t.Errorf("Dispatch(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
+				t.Errorf("Resolve(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
 			}
 		})
 	}
 }
 
-func TestParserDispatcherPriority(t *testing.T) {
+func TestParserRegistryPriority(t *testing.T) {
 	// Both plugins claim `v1/chat/completions`
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions"}}
 	custom := &testParser{name: "custom", paths: []string{"v1/chat/completions"}}
 
 	// 1. OpenAI configured first
-	dispatcher1 := NewParserDispatcher([]fwkrh.Parser{openai, custom})
-	parser1, err := dispatcher1.Dispatch("/v1/chat/completions")
+	registry1 := NewParserRegistry([]fwkrh.Parser{openai, custom})
+	parser1, err := registry1.Resolve("/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,8 +123,8 @@ func TestParserDispatcherPriority(t *testing.T) {
 	}
 
 	// 2. Custom configured first
-	dispatcher2 := NewParserDispatcher([]fwkrh.Parser{custom, openai})
-	parser2, err := dispatcher2.Dispatch("/v1/chat/completions")
+	registry2 := NewParserRegistry([]fwkrh.Parser{custom, openai})
+	parser2, err := registry2.Resolve("/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,10 +133,10 @@ func TestParserDispatcherPriority(t *testing.T) {
 	}
 }
 
-func TestParserDispatcherWithWildcard(t *testing.T) {
+func TestParserRegistryWithPassthrough(t *testing.T) {
 	openai := &testParser{name: "openai", paths: []string{"v1/chat/completions", "v1/completions"}}
-	wildcard := &testParser{name: "wildcard", paths: nil}
-	dispatcher := NewParserDispatcher([]fwkrh.Parser{openai, wildcard})
+	passthrough := &testParser{name: "passthrough", paths: nil}
+	registry := NewParserRegistry([]fwkrh.Parser{openai, passthrough})
 
 	tests := []struct {
 		name        string
@@ -145,30 +145,49 @@ func TestParserDispatcherWithWildcard(t *testing.T) {
 		expectError bool
 	}{
 		{
-			name:        "specific match wins over wildcard",
+			name:        "specific match wins over passthrough",
 			requestPath: "/v1/completions",
 			wantParser:  "openai",
 		},
 		{
-			name:        "wildcard match",
+			name:        "passthrough match",
 			requestPath: "/unknown/path",
-			wantParser:  "wildcard",
+			wantParser:  "passthrough",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := dispatcher.Dispatch(tt.requestPath)
+			parser, err := registry.Resolve(tt.requestPath)
 			if (err != nil) != tt.expectError {
-				t.Errorf("Dispatch(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
+				t.Errorf("Resolve(%q) error = %v, expectError %v", tt.requestPath, err, tt.expectError)
 				return
 			}
 			if tt.expectError {
 				return
 			}
 			if parser.TypedName().Name != tt.wantParser {
-				t.Errorf("Dispatch(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
+				t.Errorf("Resolve(%q) resolved parser = %q, want %q", tt.requestPath, parser.TypedName().Name, tt.wantParser)
 			}
 		})
+	}
+}
+
+func TestParserRegistryDuplicateTypes(t *testing.T) {
+	p1 := &testParser{name: "openai", paths: []string{"v1/chat/completions"}}
+	p2 := &testParser{name: "openai", paths: []string{"v1/completions"}}
+
+	registry := NewParserRegistry([]fwkrh.Parser{p1, p2})
+	parsers := registry.Parsers()
+	if len(parsers) != 1 {
+		t.Errorf("expected 1 parser after skipping duplicate type, got %d", len(parsers))
+	}
+	if parsers[0] != p1 {
+		t.Errorf("expected first parser to be kept, got %v", parsers[0])
+	}
+
+	_, err := registry.Resolve("/v1/completions")
+	if err == nil {
+		t.Error("expected error resolving path for skipped parser type, but succeeded")
 	}
 }
