@@ -366,6 +366,151 @@ func TestEstimateBackend_MessagesDeterministic(t *testing.T) {
 	}
 }
 
+// TestEstimateBackend_ChatSystemBeforeTools asserts a leading system message is
+// emitted before tools, so requests sharing the system but differing in tools
+// share their leading tokens.
+func TestEstimateBackend_ChatSystemBeforeTools(t *testing.T) {
+	systemContent := "you are a helpful assistant that should generate a long enough leading byte segment for this ordering test"
+	// -1 skips the token straddling the system/tools byte boundary.
+	sharedTokens := (len("system")+len(systemContent))/bytesPerToken - 1
+	chat := func(toolName string) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{
+				{Role: "system", Content: fwkrh.Content{Raw: systemContent}},
+				{Role: "user", Content: fwkrh.Content{Raw: "hi"}},
+			},
+			Tools: []any{map[string]any{"name": toolName}},
+		}}
+	}
+	a, err := estimateBackend{}.produce(context.Background(), chat("alpha"))
+	if err != nil {
+		t.Fatalf("produce alpha: %v", err)
+	}
+	b, err := estimateBackend{}.produce(context.Background(), chat("beta"))
+	if err != nil {
+		t.Fatalf("produce beta: %v", err)
+	}
+	if hashTokens(a.TokenIDs) == hashTokens(b.TokenIDs) {
+		t.Fatal("streams identical, tools were not applied")
+	}
+	for i := 0; i < sharedTokens; i++ {
+		if a.TokenIDs[i] != b.TokenIDs[i] {
+			t.Errorf("token %d differs: system content should seed the prefix before tools", i)
+		}
+	}
+}
+
+// TestEstimateBackend_MessagesSystemBeforeTools is the /v1/messages analog of
+// TestEstimateBackend_ChatSystemBeforeTools.
+func TestEstimateBackend_MessagesSystemBeforeTools(t *testing.T) {
+	systemContent := "you are a helpful assistant that should generate a long enough leading byte segment for this ordering test"
+	// System is emitted without a role prefix; -1 skips the boundary token.
+	sharedTokens := len(systemContent)/bytesPerToken - 1
+	build := func(toolName string) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+			System: fwkrh.AnthropicContent{Raw: systemContent},
+			Messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hi"}},
+			},
+			Tools: []any{map[string]any{"name": toolName}},
+		}}
+	}
+	a, err := estimateBackend{}.produce(context.Background(), build("alpha"))
+	if err != nil {
+		t.Fatalf("produce alpha: %v", err)
+	}
+	b, err := estimateBackend{}.produce(context.Background(), build("beta"))
+	if err != nil {
+		t.Fatalf("produce beta: %v", err)
+	}
+	if hashTokens(a.TokenIDs) == hashTokens(b.TokenIDs) {
+		t.Fatal("streams identical, tools were not applied")
+	}
+	for i := 0; i < sharedTokens; i++ {
+		if a.TokenIDs[i] != b.TokenIDs[i] {
+			t.Errorf("token %d differs: system content should seed the prefix before tools", i)
+		}
+	}
+}
+
+// TestEstimateBackend_ChatToolsAffectPrefix asserts the tools list participates
+// in the prefix stream so distinct tool sets do not collide on the same key.
+func TestEstimateBackend_ChatToolsAffectPrefix(t *testing.T) {
+	chat := func(tools []any) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Messages: []fwkrh.Message{{Role: "user", Content: fwkrh.Content{Raw: "hello world"}}},
+			Tools:    tools,
+		}}
+	}
+	noTools, err := estimateBackend{}.produce(context.Background(), chat(nil))
+	if err != nil {
+		t.Fatalf("produce no-tools: %v", err)
+	}
+	weather := []any{map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "get_weather"},
+	}}
+	withTools, err := estimateBackend{}.produce(context.Background(), chat(weather))
+	if err != nil {
+		t.Fatalf("produce with-tools: %v", err)
+	}
+	if hashTokens(noTools.TokenIDs) == hashTokens(withTools.TokenIDs) {
+		t.Error("tools list was ignored by the prefix estimator")
+	}
+	stock := []any{map[string]any{
+		"type":     "function",
+		"function": map[string]any{"name": "get_stock_price"},
+	}}
+	otherTools, err := estimateBackend{}.produce(context.Background(), chat(stock))
+	if err != nil {
+		t.Fatalf("produce other-tools: %v", err)
+	}
+	if hashTokens(withTools.TokenIDs) == hashTokens(otherTools.TokenIDs) {
+		t.Error("different tools lists produced identical tokens")
+	}
+}
+
+// TestEstimateBackend_MessagesToolsAffectPrefix is the /v1/messages analog of
+// TestEstimateBackend_ChatToolsAffectPrefix.
+func TestEstimateBackend_MessagesToolsAffectPrefix(t *testing.T) {
+	build := func(tools []any) *fwkrh.InferenceRequestBody {
+		return &fwkrh.InferenceRequestBody{Messages: &fwkrh.MessagesRequest{
+			Messages: []fwkrh.AnthropicMessage{
+				{Role: "user", Content: fwkrh.AnthropicContent{Raw: "hello world"}},
+			},
+			Tools: tools,
+		}}
+	}
+	noTools, err := estimateBackend{}.produce(context.Background(), build(nil))
+	if err != nil {
+		t.Fatalf("produce no-tools: %v", err)
+	}
+	weather := []any{map[string]any{
+		"name":         "get_weather",
+		"description":  "Get the current weather",
+		"input_schema": map[string]any{"type": "object"},
+	}}
+	withTools, err := estimateBackend{}.produce(context.Background(), build(weather))
+	if err != nil {
+		t.Fatalf("produce with-tools: %v", err)
+	}
+	if hashTokens(noTools.TokenIDs) == hashTokens(withTools.TokenIDs) {
+		t.Error("tools list was ignored by the messages prefix estimator")
+	}
+	stock := []any{map[string]any{
+		"name":         "get_stock_price",
+		"description":  "Get a stock price",
+		"input_schema": map[string]any{"type": "object"},
+	}}
+	otherTools, err := estimateBackend{}.produce(context.Background(), build(stock))
+	if err != nil {
+		t.Fatalf("produce other-tools: %v", err)
+	}
+	if hashTokens(withTools.TokenIDs) == hashTokens(otherTools.TokenIDs) {
+		t.Error("different tools lists produced identical tokens")
+	}
+}
+
 // TestEstimateBackend_NonChatNoFeatures asserts non-chat protocols carry no
 // multimodal features.
 func TestEstimateBackend_NonChatNoFeatures(t *testing.T) {
