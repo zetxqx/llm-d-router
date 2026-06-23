@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/spf13/pflag"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -70,10 +76,37 @@ func main() {
 	srv := server.New(cfg.Server, p)
 
 	log.Info("starting coordinator", "addr", cfg.Server.ListenAddr)
-	if err := srv.ListenAndServe(); err != nil {
+	log.Info("graceful shutdown enabled", "timeout", cfg.Server.ShutdownTimeout)
+
+	if err := serveUntilSignal(srv, cfg.Server.ShutdownTimeout); err != nil {
 		log.Error(err, "server error")
 		os.Exit(1)
 	}
+}
+
+// serveUntilSignal starts srv and blocks until it exits or a signal is received.
+// On SIGTERM/SIGINT it initiates a graceful drain bounded by shutdownTimeout.
+func serveUntilSignal(srv *server.Server, shutdownTimeout time.Duration) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	srvErr := make(chan error, 1)
+	go func() { srvErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-srvErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-ctx.Done():
+		stop()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validatePipeline rejects configurations that cannot work before any step runs.
