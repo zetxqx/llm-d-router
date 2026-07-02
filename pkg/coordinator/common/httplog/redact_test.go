@@ -41,6 +41,22 @@ func TestRedactedHeaders_LowercasesAndFlattensHTTPHeader(t *testing.T) {
 	}
 }
 
+// The request.Header field (typed http.Header) is accepted without an explicit
+// conversion, matching the call sites in the gateway and step packages.
+func TestRedactedHeaders_AcceptsRequestHeaderField(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Request-Id", "req-field-id")
+
+	out := RedactedHeaders(req.Header)
+
+	if got := out["x-request-id"]; got != "req-field-id" {
+		t.Errorf("x-request-id = %q, want %q", got, "req-field-id")
+	}
+}
+
 func TestRedactedHeaders_LowercasesStringMap(t *testing.T) {
 	out := RedactedHeaders(map[string]string{
 		"x-request-id": "abc-123",
