@@ -105,7 +105,9 @@ func NewReplaceMediaURLsStep(_ *gateway.Client, params map[string]any) (pipeline
 	}
 
 	guard := &addressGuard{}
-	if v, ok := params["allow_private_networks"].(bool); ok {
+	if v, ok, err := paramBool(params, "allow_private_networks"); err != nil {
+		return nil, err
+	} else if ok {
 		guard.allowPrivate = v
 	}
 	if raw, present := params["allowed_domains"]; present {

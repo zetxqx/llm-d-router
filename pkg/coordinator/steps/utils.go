@@ -45,12 +45,16 @@ func upstreamError(step string, statusCode int, body []byte) error {
 }
 
 // parseUseOpenAIFormat reads the use_openai_format step parameter, defaulting to
-// true when absent or not a bool.
-func parseUseOpenAIFormat(params map[string]any) bool {
-	if v, ok := params["use_openai_format"].(bool); ok {
-		return v
+// true when absent. A present but non-bool value is a configuration error.
+func parseUseOpenAIFormat(params map[string]any) (bool, error) {
+	v, ok, err := paramBool(params, "use_openai_format")
+	if err != nil {
+		return false, err
 	}
-	return true
+	if !ok {
+		return true, nil
+	}
+	return v, nil
 }
 
 // resolveFormat maps a request path to the wire format a step emits. Completions

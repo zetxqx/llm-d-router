@@ -45,7 +45,11 @@ func NewConditionalDecodeStep(gwClient *gateway.Client, params map[string]any) (
 	if gwClient == nil {
 		return nil, errors.New("conditional-decode: gateway client is required")
 	}
-	return &ConditionalDecodeStep{useOpenAIFormat: parseUseOpenAIFormat(params), gwClient: gwClient}, nil
+	useOpenAI, err := parseUseOpenAIFormat(params)
+	if err != nil {
+		return nil, err
+	}
+	return &ConditionalDecodeStep{useOpenAIFormat: useOpenAI, gwClient: gwClient}, nil
 }
 
 func (s *ConditionalDecodeStep) Name() string { return ConditionalDecodeStepName }

@@ -103,3 +103,17 @@ func paramString(params map[string]any, key string) (string, error) {
 		return "", fmt.Errorf("%s: expected string, got %T", key, v)
 	}
 }
+
+// paramBool reads a boolean step parameter. A missing key returns ok=false so
+// the caller can apply its default; a key present with a non-bool value is a
+// configuration error.
+func paramBool(params map[string]any, key string) (value bool, ok bool, err error) {
+	switch v := params[key].(type) {
+	case nil:
+		return false, false, nil
+	case bool:
+		return v, true, nil
+	default:
+		return false, false, fmt.Errorf("%s: expected bool, got %T", key, v)
+	}
+}

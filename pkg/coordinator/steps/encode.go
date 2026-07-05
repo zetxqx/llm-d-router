@@ -51,7 +51,10 @@ func NewEncodeStep(gwClient *gateway.Client, params map[string]any) (pipeline.St
 	if gwClient == nil {
 		return nil, errors.New("encode: gateway client is required")
 	}
-	useOpenAI := parseUseOpenAIFormat(params)
+	useOpenAI, err := parseUseOpenAIFormat(params)
+	if err != nil {
+		return nil, fmt.Errorf("encode: %w", err)
+	}
 	maxParallel := 8
 	if v, ok, err := paramInt(params, "max_parallel"); err != nil {
 		return nil, err
