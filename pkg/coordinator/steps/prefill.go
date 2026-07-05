@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -110,7 +111,7 @@ func (s *PrefillStep) Execute(ctx context.Context, reqCtx *pipeline.RequestConte
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode/100 != 2 {
+	if resp.StatusCode != http.StatusOK {
 		respBody := readErrorBody(resp.Body)
 		return upstreamError(PrefillStepName, resp.StatusCode, respBody)
 	}

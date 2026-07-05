@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -132,7 +133,7 @@ func (s *EncodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 			}
 			defer resp.Body.Close()
 
-			if resp.StatusCode/100 != 2 {
+			if resp.StatusCode != http.StatusOK {
 				respBody := readErrorBody(resp.Body)
 				err := upstreamError(fmt.Sprintf("%s[%d]", EncodeStepName, i), resp.StatusCode, respBody)
 				logger.Error(err, "encode fanout status", "index", i, "status", resp.StatusCode)
