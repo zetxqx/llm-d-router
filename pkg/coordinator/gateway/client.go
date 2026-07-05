@@ -131,22 +131,34 @@ func (c *Client) Transport() http.RoundTripper {
 	return c.httpClient.Transport
 }
 
-// redactBody parses JSON and replaces string values longer than 50 chars with
-// "..." so tensor blobs don't drown out the structural fields.
+// Log-redaction limits, applied when a request/response body is logged at TRACE.
+const (
+	// maxRedactStringLen is the longest JSON string value kept verbatim; longer
+	// values are replaced with a marker so tensor blobs, base64, and URLs do not
+	// drown out the structural fields.
+	maxRedactStringLen = 50
+	// maxRedactRawBodyLen bounds a non-JSON body logged verbatim.
+	maxRedactRawBodyLen = 200
+	// maxRedactElems caps how many array elements are kept before a count marker.
+	maxRedactElems = 10
+	// maxRedactDepth caps redactStrings recursion so a deeply nested adversarial
+	// body cannot drive it toward the 500-level encoding/json limit on a trace log.
+	maxRedactDepth = 32
+)
+
+// redactBody parses JSON and redacts oversized string values (see
+// maxRedactStringLen); a body that is not valid JSON is returned verbatim, or
+// truncated at maxRedactRawBodyLen.
 func redactBody(data []byte) any {
 	var v any
 	if err := json.Unmarshal(data, &v); err != nil {
-		if len(data) > 200 {
-			return string(data[:200]) + "..."
+		if len(data) > maxRedactRawBodyLen {
+			return string(data[:maxRedactRawBodyLen]) + "..."
 		}
 		return string(data)
 	}
 	return redactStrings(v)
 }
-
-// maxRedactDepth caps redactStrings recursion so a deeply nested adversarial
-// body cannot drive it toward the 500-level encoding/json limit on a trace log.
-const maxRedactDepth = 32
 
 func redactStrings(v any) any {
 	return redactStringsDepth(v, 0)
@@ -158,7 +170,7 @@ func redactStringsDepth(v any, depth int) any {
 	}
 	switch val := v.(type) {
 	case string:
-		if len(val) > 50 {
+		if len(val) > maxRedactStringLen {
 			if strings.HasPrefix(val, "data:") {
 				return "[base64]"
 			}
@@ -175,13 +187,12 @@ func redactStringsDepth(v any, depth int) any {
 		}
 		return out
 	case []any:
-		const maxElems = 10
-		if len(val) > maxElems {
-			out := make([]any, maxElems+1)
-			for i := 0; i < maxElems; i++ {
+		if len(val) > maxRedactElems {
+			out := make([]any, maxRedactElems+1)
+			for i := 0; i < maxRedactElems; i++ {
 				out[i] = redactStringsDepth(val[i], depth+1)
 			}
-			out[maxElems] = fmt.Sprintf("... +%d more", len(val)-maxElems)
+			out[maxRedactElems] = fmt.Sprintf("... +%d more", len(val)-maxRedactElems)
 			return out
 		}
 		out := make([]any, len(val))

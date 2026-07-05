@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -69,7 +70,7 @@ func TestRedactStrings(t *testing.T) {
 		want any
 	}{
 		{"short string unchanged", shortStr, shortStr},
-		{"exactly 50 chars unchanged", strings.Repeat("a", 50), strings.Repeat("a", 50)},
+		{"exactly max length unchanged", strings.Repeat("a", maxRedactStringLen), strings.Repeat("a", maxRedactStringLen)},
 		{"long data URI redacted", longBase64, "[base64]"},
 		{"long https URL redacted", longURL, "[url]"},
 		{"long http URL redacted", longHTTP, "[url]"},
@@ -99,7 +100,8 @@ func TestRedactStrings(t *testing.T) {
 // An array longer than the cap keeps the first 10 elements (redacted) and a
 // trailing count marker, so a long prompt list cannot flood the log.
 func TestRedactStrings_TruncatesLongArray(t *testing.T) {
-	in := make([]any, 15)
+	const extra = 5
+	in := make([]any, maxRedactElems+extra)
 	for i := range in {
 		in[i] = "elem"
 	}
@@ -108,10 +110,10 @@ func TestRedactStrings_TruncatesLongArray(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected []any, got %T", redactStrings(in))
 	}
-	if len(got) != 11 {
-		t.Fatalf("expected 10 elements + marker = 11, got %d", len(got))
+	if len(got) != maxRedactElems+1 {
+		t.Fatalf("expected %d elements + marker, got %d", maxRedactElems, len(got))
 	}
-	if marker, want := got[10], "... +5 more"; marker != want {
+	if marker, want := got[maxRedactElems], fmt.Sprintf("... +%d more", extra); marker != want {
 		t.Errorf("truncation marker = %v, want %q", marker, want)
 	}
 }
@@ -157,19 +159,19 @@ func TestRedactBody(t *testing.T) {
 		}
 	})
 
-	t.Run("non-JSON under 200 bytes returned verbatim", func(t *testing.T) {
+	t.Run("non-JSON under max length returned verbatim", func(t *testing.T) {
 		if got := redactBody([]byte("not json")); got != "not json" {
 			t.Errorf("redactBody = %v, want verbatim string", got)
 		}
 	})
 
-	t.Run("non-JSON over 200 bytes truncated", func(t *testing.T) {
-		raw := strings.Repeat("q", 250)
+	t.Run("non-JSON over max length truncated", func(t *testing.T) {
+		raw := strings.Repeat("q", maxRedactRawBodyLen+50)
 		got, ok := redactBody([]byte(raw)).(string)
 		if !ok {
 			t.Fatalf("expected string, got %T", redactBody([]byte(raw)))
 		}
-		if want := raw[:200] + "..."; got != want {
+		if want := raw[:maxRedactRawBodyLen] + "..."; got != want {
 			t.Errorf("redactBody truncation = %q, want %q", got, want)
 		}
 	})
