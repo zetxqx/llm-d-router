@@ -887,7 +887,8 @@ func TestDirector_HandleRequest(t *testing.T) {
 					reqCtx.Request.Headers[metadata.FlowFairnessIDKey] = test.fairnessIDHeader
 				}
 
-				parseResult, parseErr := openai.NewOpenAIParser().ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+				reqCtx.Parser = openai.NewOpenAIParser()
+				parseResult, parseErr := reqCtx.Parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 				var returnedReqCtx *handlers.RequestContext
 				if parseErr != nil {
 					err = errcommon.Error{Code: errcommon.BadRequest, Msg: parseErr.Error()}
@@ -1898,7 +1899,8 @@ func TestDirector_HandleRequest_ConditionalDecode(t *testing.T) {
 			require.NoError(t, err)
 			reqCtx.Request.RawBody = body
 
-			parseResult, err := openai.NewOpenAIParser().ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
+			reqCtx.Parser = openai.NewOpenAIParser()
+			parseResult, err := reqCtx.Parser.ParseRequest(ctx, reqCtx.Request.RawBody, reqCtx.Request.Headers)
 			require.NoError(t, err)
 
 			_, err = dir.HandleRequest(ctx, reqCtx, parseResult.Body)

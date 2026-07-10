@@ -20,7 +20,6 @@ package requestcontrol
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -244,6 +243,9 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 
 	logger := log.FromContext(ctx)
 
+	// Record the client-facing model for every request, including forwarded-unchanged ones.
+	reqCtx.IncomingModelName = inferenceRequestBody.Model
+
 	err = d.modelRewriteIfNeeded(ctx, reqCtx, inferenceRequestBody)
 	if err != nil {
 		return reqCtx, err
@@ -356,45 +358,44 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 }
 
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
-	if v, ok := inferenceRequestBody.Payload.(fwkrh.PayloadMap); ok {
-		// Mutate the model name inside the map, this is currently only supported if the payload is a PayloadMap.
-		_, err := d.mutateModel(ctx, reqCtx, v)
-		if err != nil {
-			return err
-		}
+	rewriter, ok := reqCtx.Parser.(fwkrh.ModelNameRewriter)
+	if !ok {
+		return nil
 	}
-	return nil
-}
-
-func (d *Director) mutateModel(ctx context.Context, reqCtx *handlers.RequestContext, bodyMap map[string]any) (*handlers.RequestContext, error) {
-	reqCtx.IncomingModelName, _ = bodyMap["model"].(string)
+	payload, ok := inferenceRequestBody.Payload.(fwkrh.MarshalablePayload)
+	if !ok {
+		return nil
+	}
 	if reqCtx.TargetModelName == "" {
 		reqCtx.TargetModelName = reqCtx.IncomingModelName
 	}
 	d.applyWeightedModelRewrite(ctx, reqCtx)
 	if reqCtx.TargetModelName == "" {
-		return reqCtx, errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
+		return errcommon.Error{Code: errcommon.BadRequest, Msg: "model not found in request body"}
 	}
-	bodyMap["model"] = reqCtx.TargetModelName
-	return reqCtx, nil
+	mutated, err := rewriter.RewriteModelName(payload, reqCtx.TargetModelName)
+	if err != nil {
+		return err
+	}
+	// Store the result back so repackage serializes the mutated payload.
+	inferenceRequestBody.Payload = mutated
+	return nil
 }
 
 func (d *Director) repackage(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
-	logger := log.FromContext(ctx)
-	switch v := inferenceRequestBody.Payload.(type) {
-	case fwkrh.PayloadMap:
-		requestBodyBytes, err := json.Marshal(v)
-		if err != nil {
-			logger.Error(err, "Error marshalling request body")
-			return errcommon.Error{Code: errcommon.Internal, Msg: "Error marshalling request body"}
-		}
-		reqCtx.Request.RawBody = requestBodyBytes
-		reqCtx.RequestSize = len(requestBodyBytes)
-	case fwkrh.PayloadProto, fwkrh.RawPayload:
+	marshaler, ok := inferenceRequestBody.Payload.(fwkrh.Marshaler)
+	if !ok {
+		// Payload forwarded unchanged (raw or proto).
 		reqCtx.RequestSize = len(reqCtx.Request.RawBody)
-	default:
-		return errcommon.Error{Code: errcommon.BadRequest, Msg: "Unsupported llmRequest parsedBody"}
+		return nil
 	}
+	requestBodyBytes, err := marshaler.Marshal()
+	if err != nil {
+		log.FromContext(ctx).Error(err, "Error marshalling request body")
+		return errcommon.Error{Code: errcommon.Internal, Msg: "Error marshalling request body"}
+	}
+	reqCtx.Request.RawBody = requestBodyBytes
+	reqCtx.RequestSize = len(requestBodyBytes)
 	return nil
 }
 
