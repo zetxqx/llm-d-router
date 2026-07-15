@@ -358,12 +358,15 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 }
 
 func (d *Director) modelRewriteIfNeeded(ctx context.Context, reqCtx *handlers.RequestContext, inferenceRequestBody *fwkrh.InferenceRequestBody) error {
+	logger := log.FromContext(ctx)
 	rewriter, ok := reqCtx.Parser.(fwkrh.ModelNameRewriter)
 	if !ok {
+		logger.Info("Warning: parser does not implement ModelNameRewriter, skipping model rewrite")
 		return nil
 	}
 	payload, ok := inferenceRequestBody.Payload.(fwkrh.MarshalablePayload)
 	if !ok {
+		logger.Info("Warning: payload does not implement MarshalablePayload, skipping model rewrite")
 		return nil
 	}
 	if reqCtx.TargetModelName == "" {
