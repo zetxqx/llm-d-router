@@ -351,8 +351,8 @@ func TestHandleRequestHeaders_WebSocketUpgrade(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Equal(t, "1.2.3.4:80", reqCtx.TargetEndpoint, "upgrade must be routed to an endpoint at header time")
-	assert.Equal(t, RequestResponseProcessingSkipped, reqCtx.RequestState,
-		"upgrade must skip body and response processing")
+	assert.True(t, reqCtx.UpgradedConnection,
+		"upgrade must be marked so body chunks are forwarded per chunk instead of buffered")
 	assert.NotNil(t, reqCtx.reqHeaderResp, "header response must carry the routing decision")
 }
 

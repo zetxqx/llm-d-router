@@ -67,13 +67,11 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 }
 
 // scheduleUpgradeAtHeaderTime routes an upgrade request to a random endpoint
-// (the same pick used for other bodyless requests) and marks all further
-// ext_proc phases for it as skipped. Skipping matters as much as scheduling:
-// after the upgrade completes, the connection's frames reach the EPP as body
-// chunks with no terminating EndOfStream (the body modes are
-// FULL_DUPLEX_STREAMED), which the body path would buffer without bound. The
-// skipped state sends the header response carrying the endpoint and then
-// closes the ext_proc stream, so Envoy proxies the connection unassisted.
+// (the same pick used for other bodyless requests) and marks the connection
+// upgraded: after the upgrade completes, the connection's frames reach the
+// EPP as body chunks with no terminating EndOfStream (the body modes are
+// FULL_DUPLEX_STREAMED), so the body paths log and forward them per chunk
+// instead of buffering for a decode that never triggers.
 func (s *StreamingServer) scheduleUpgradeAtHeaderTime(ctx context.Context, reqCtx *RequestContext) error {
 	if err := s.fallbackToRandomEndpoint(ctx, reqCtx, 0); err != nil {
 		return err
@@ -81,7 +79,7 @@ func (s *StreamingServer) scheduleUpgradeAtHeaderTime(ctx context.Context, reqCt
 
 	logger := log.FromContext(ctx)
 	logger.V(logutil.DEFAULT).Info("EPP scheduled websocket upgrade at header time", "targetEndpoint", reqCtx.TargetEndpoint)
-	reqCtx.RequestState = RequestResponseProcessingSkipped
+	reqCtx.UpgradedConnection = true
 	return nil
 }
 

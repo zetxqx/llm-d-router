@@ -19,6 +19,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"io"
 	"strings"
 	"sync"
@@ -135,6 +136,12 @@ type RequestContext struct {
 	RequestState         StreamRequestState
 	RequestDroppedReason errcommon.RequestDroppedReason
 	modelServerStreaming bool
+
+	// UpgradedConnection marks a protocol-upgrade request (e.g. websocket)
+	// scheduled at header time. Its body chunks in both directions are raw
+	// connection frames with no terminating EndOfStream: they are logged and
+	// passed through per chunk instead of buffered and parsed.
+	UpgradedConnection bool
 
 	Response *Response
 
@@ -406,6 +413,36 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			logHeaderMap(logger, "EPP received request headers", v.RequestHeaders.Headers)
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
+			if reqCtx.UpgradedConnection {
+				logger.Info("EPP received upgrade request frame chunk",
+					"bytes", len(v.RequestBody.Body),
+					"endOfStream", v.RequestBody.EndOfStream,
+					"prefixHex", hexPrefix(v.RequestBody.Body))
+				// Echo the chunk with the incoming EndOfStream mirrored:
+				// GenerateRequestBodyResponses forces EndOfStream on the last
+				// chunk, which would tell Envoy the client stream is complete
+				// and stall the connection.
+				echo := &extProcPb.ProcessingResponse{
+					Response: &extProcPb.ProcessingResponse_RequestBody{
+						RequestBody: &extProcPb.BodyResponse{
+							Response: &extProcPb.CommonResponse{
+								BodyMutation: &extProcPb.BodyMutation{
+									Mutation: &extProcPb.BodyMutation_StreamedResponse{
+										StreamedResponse: &extProcPb.StreamedBodyResponse{
+											Body:        v.RequestBody.Body,
+											EndOfStream: v.RequestBody.EndOfStream,
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+				if err := srv.Send(echo); err != nil {
+					return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
+				}
+				continue
+			}
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
 			// In the stream case, we can receive multiple request bodies.
 			buf.Write(v.RequestBody.Body)
@@ -487,6 +524,17 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 		case *extProcPb.ProcessingRequest_ResponseBody:
 			endOfStream := v.ResponseBody.EndOfStream
 			chunk := v.ResponseBody.Body
+
+			if reqCtx.UpgradedConnection {
+				logger.Info("EPP received upgrade response frame chunk",
+					"bytes", len(chunk),
+					"endOfStream", endOfStream,
+					"prefixHex", hexPrefix(chunk))
+				// The streaming send path (HeaderResponseResponseComplete state)
+				// forwards these each pass without advancing the state machine.
+				reqCtx.respBodyResp = generateResponseBodyResponses(chunk, endOfStream, reqCtx.Response.DynamicMetadata)
+				break
+			}
 
 			if reqCtx.modelServerStreaming {
 				if endOfStream {
@@ -704,6 +752,16 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 		logger.V(logutil.DEBUG).Info("EPP sent trailer back to proxy")
 	}
 	return nil
+}
+
+// hexPrefix renders up to the first 32 bytes of b as hex, enough to see a
+// websocket frame header and the start of its payload.
+func hexPrefix(b []byte) string {
+	const n = 32
+	if len(b) > n {
+		b = b[:n]
+	}
+	return hex.EncodeToString(b)
 }
 
 func logHeaderMap(logger logr.Logger, msg string, headerMap *configPb.HeaderMap) {
