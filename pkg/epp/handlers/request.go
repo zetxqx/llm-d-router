@@ -28,9 +28,11 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/protobuf/types/known/structpb"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	envoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
 	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
+	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
 	"github.com/llm-d/llm-d-router/pkg/epp/util/request"
 )
@@ -54,7 +56,49 @@ func (s *StreamingServer) HandleRequestHeaders(ctx context.Context, reqCtx *Requ
 	reqCtx.ObjectiveKey, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ObjectiveKey)
 	reqCtx.TargetModelName, _ = metadata.GetLowerCaseHeaderValue(reqCtx.Request.Headers, metadata.ModelNameRewriteKey)
 
+	// A protocol upgrade is a bodyless request whose stream stays open, so the
+	// body EndOfStream that normally triggers scheduling never arrives. Schedule
+	// it from the headers alone.
+	if isWebSocketUpgrade(reqCtx.Request.Headers) {
+		return s.scheduleUpgradeAtHeaderTime(ctx, reqCtx)
+	}
+
 	return nil
+}
+
+// scheduleUpgradeAtHeaderTime routes an upgrade request to a random endpoint
+// (the same pick used for other bodyless requests) and marks all further
+// ext_proc phases for it as skipped. Skipping matters as much as scheduling:
+// after the upgrade completes, the connection's frames reach the EPP as body
+// chunks with no terminating EndOfStream (the body modes are
+// FULL_DUPLEX_STREAMED), which the body path would buffer without bound. The
+// skipped state sends the header response carrying the endpoint and then
+// closes the ext_proc stream, so Envoy proxies the connection unassisted.
+func (s *StreamingServer) scheduleUpgradeAtHeaderTime(ctx context.Context, reqCtx *RequestContext) error {
+	if err := s.fallbackToRandomEndpoint(ctx, reqCtx, 0); err != nil {
+		return err
+	}
+
+	logger := log.FromContext(ctx)
+	logger.V(logutil.DEFAULT).Info("EPP scheduled websocket upgrade at header time", "targetEndpoint", reqCtx.TargetEndpoint)
+	reqCtx.RequestState = RequestResponseProcessingSkipped
+	return nil
+}
+
+// isWebSocketUpgrade reports whether the lowercase-keyed request headers
+// describe a websocket upgrade (RFC 6455 section 4.1): an "upgrade" token in
+// Connection and "websocket" in Upgrade. Values are case-insensitive and
+// Connection may carry a comma-separated token list.
+func isWebSocketUpgrade(headers map[string]string) bool {
+	if !strings.EqualFold(strings.TrimSpace(headers["upgrade"]), "websocket") {
+		return false
+	}
+	for _, token := range strings.Split(headers["connection"], ",") {
+		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *StreamingServer) fallbackToRandomEndpoint(ctx context.Context, reqCtx *RequestContext, requestSize int) error {
