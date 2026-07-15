@@ -392,7 +392,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey] = requestID // update in headers so director can consume it
 			}
 			logger = logger.WithValues(reqcommon.RequestIDHeaderKey, requestID)
-			logger.V(logutil.DEFAULT).Info("EPP received request") // Request ID will be logged too as part of logger context values.
+			logger.V(logutil.DEFAULT).Info("EPP received request", "endOfStream", v.RequestHeaders.EndOfStream) // Request ID will be logged too as part of logger context values.
 			loggerTrace = logger.V(logutil.TRACE)
 			ctx = log.IntoContext(ctx, logger)
 
@@ -403,6 +403,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			ctx = extractTraceContext(ctx, v)
 			ctx, span = tracer.Start(ctx, "gateway.request", trace.WithSpanKind(trace.SpanKindServer))
 
+			logHeaderMap(logger, "EPP received request headers", v.RequestHeaders.Headers)
 			err = s.HandleRequestHeaders(ctx, reqCtx, v)
 		case *extProcPb.ProcessingRequest_RequestBody:
 			loggerTrace.Info("Incoming body chunk", "EoS", v.RequestBody.EndOfStream)
@@ -461,9 +462,12 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				if parseResult.SkipResponseProcessing {
 					reqCtx.RequestState = RequestResponseProcessingSkipped
 				}
+
+				logger.Info("EPP received request body", "body", string(reqCtx.Request.RawBody))
 			}
 		case *extProcPb.ProcessingRequest_RequestTrailers:
 			// This is currently unused.
+			logHeaderMap(logger, "EPP received request trailers", v.RequestTrailers.Trailers)
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				value := string(header.RawValue)
@@ -476,6 +480,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 				}
 			}
 			reqCtx.RequestState = ResponseReceived
+			logHeaderMap(logger, "EPP received response headers", v.ResponseHeaders.Headers)
 			reqCtx = s.HandleResponseHeaders(ctx, reqCtx, v)
 			reqCtx.respHeaderResp = s.generateResponseHeaderResponse(reqCtx)
 
@@ -489,6 +494,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 					reqCtx.ResponseCompleteTimestamp = time.Now()
 				}
 				s.HandleResponseBody(ctx, reqCtx, chunk, endOfStream)
+				logger.Info("EPP received response body chunk", "chunk", string(chunk), "endOfStream", endOfStream)
 				// Rewrite the model name in response body back to the original client-facing name.
 				chunk = rewriteModelName(chunk, reqCtx.TargetModelName, reqCtx.IncomingModelName)
 				// For streaming response, we send response chunk back to envoy every time we received it.
@@ -496,6 +502,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			} else {
 				respBody = append(respBody, chunk...)
 				if endOfStream {
+					logger.Info("EPP received full response body", "body", string(respBody))
 					s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, true)
 				}
 			}
@@ -503,6 +510,7 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// For HTTP, the response trailer is not sent. Thus, this case will not be triggered.
 			// For gRPC(over HTTP2), the protocol relies on responseTrailers to determine whether a response is complete.
 			// More info: https://chromium.googlesource.com/external/github.com/grpc/grpc/+/HEAD/doc/PROTOCOL-HTTP2.md#responses
+			logHeaderMap(logger, "EPP received response trailers", v.ResponseTrailers.Trailers)
 			s.finishResponse(ctx, reqCtx, respBody, reqCtx.modelServerStreaming, false)
 			reqCtx.respTrailerResp = &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
@@ -697,3 +705,16 @@ func (r *RequestContext) updateStateAndSendIfNeeded(srv extProcPb.ExternalProces
 	}
 	return nil
 }
+
+func logHeaderMap(logger logr.Logger, msg string, headerMap *configPb.HeaderMap) {
+	if headerMap == nil {
+		logger.Info(msg, "headers", nil)
+		return
+	}
+	headers := make(map[string]string)
+	for _, h := range headerMap.Headers {
+		headers[h.Key] = envoy.GetHeaderValue(h)
+	}
+	logger.Info(msg, "headers", headers)
+}
+
