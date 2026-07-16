@@ -49,9 +49,9 @@ type stubSchedulingEndpoint struct {
 	attr     datalayer.AttributeMap
 }
 
-func newStubSchedulingEndpoint(name string) *stubSchedulingEndpoint {
+func newStubSchedulingEndpoint() *stubSchedulingEndpoint {
 	return &stubSchedulingEndpoint{
-		metadata: &datalayer.EndpointMetadata{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}},
+		metadata: &datalayer.EndpointMetadata{NamespacedName: types.NamespacedName{Name: "pod-a", Namespace: "default"}},
 		attr:     datalayer.NewAttributes(),
 	}
 }
@@ -188,7 +188,7 @@ func TestDiffusionLoadProducer_Lifecycle(t *testing.T) {
 	producer := newTestProducer(t, Config{})
 	ctx := context.Background()
 
-	endpoint := newStubSchedulingEndpoint("pod-a")
+	endpoint := newStubSchedulingEndpoint()
 	eid := endpoint.GetMetadata().NamespacedName.String()
 	result := makeSchedulingResult(endpoint)
 
@@ -232,7 +232,7 @@ func TestDiffusionLoadProducer_NonImageRequestNotTracked(t *testing.T) {
 	t.Parallel()
 
 	producer := newTestProducer(t, Config{})
-	endpoint := newStubSchedulingEndpoint("pod-a")
+	endpoint := newStubSchedulingEndpoint()
 	eid := endpoint.GetMetadata().NamespacedName.String()
 
 	request := &fwksched.InferenceRequest{RequestID: "req-1", Body: &fwkrh.InferenceRequestBody{}}
@@ -246,7 +246,7 @@ func TestDiffusionLoadProducer_Extract(t *testing.T) {
 	producer := newTestProducer(t, Config{})
 	ctx := context.Background()
 
-	endpoint := newStubSchedulingEndpoint("pod-a")
+	endpoint := newStubSchedulingEndpoint()
 	eid := endpoint.GetMetadata().NamespacedName.String()
 
 	// Registration does not publish an attribute; Produce does that per request.
@@ -269,7 +269,7 @@ func TestDiffusionLoadProducer_Produce(t *testing.T) {
 	producer := newTestProducer(t, Config{})
 	ctx := context.Background()
 
-	endpoint := newStubSchedulingEndpoint("pod-a")
+	endpoint := newStubSchedulingEndpoint()
 
 	// Before any cost is committed, Produce publishes a zero snapshot.
 	require.NoError(t, producer.Produce(ctx, nil, []fwksched.Endpoint{endpoint}))
