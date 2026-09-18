@@ -33,9 +33,16 @@ func TestFactory(t *testing.T) {
 		require.NoError(t, err)
 		a, ok := p.(*ThunderAgent)
 		require.True(t, ok)
+		// Upstream ThunderAgent tr-decay defaults: fit against full capacity,
+		// 2^-t decay in seconds, 5 s scheduler tick, 1800 s forced resume,
+		// no shared_tokens correction (dead code upstream).
 		assert.Equal(t, float64(4194304), a.capacityTokens)
-		assert.Equal(t, 0.9, a.utilThreshold)
-		assert.Equal(t, time.Duration(0), a.table.actingHalfLife)
+		assert.Equal(t, 1.0, a.utilThreshold)
+		assert.Equal(t, time.Second, a.table.actingHalfLife)
+		assert.Equal(t, 5*time.Second, a.pauseSweep)
+		assert.Equal(t, 1800000.0, a.headWaitStarvationMs)
+		assert.False(t, a.kvUsageCorrection)
+		assert.Equal(t, 100.0, a.bufferTokensPerProgram)
 		assert.Equal(t, "x-session-final", a.sessionFinalHeader)
 	})
 
@@ -54,6 +61,8 @@ func TestFactory(t *testing.T) {
 		"starvation":     `{"headWaitStarvationMs": -1}`,
 		"ttl":            `{"evictionTtlSeconds": 0}`,
 		"sweep":          `{"evictionSweepSeconds": 0}`,
+		"pause sweep":    `{"pauseSweepSeconds": -1}`,
+		"ttl below hold": `{"evictionTtlSeconds": 60}`, // a held program would be evicted mid-wait
 		"final header":   `{"sessionFinalHeader": " "}`,
 	}
 	for name, raw := range invalid {
@@ -77,6 +86,9 @@ func TestDumpState(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &state))
 	assert.Equal(t, 1, state.TotalPrograms)
 	assert.Equal(t, int64(100), state.TotalInflightTokens)
+	assert.Equal(t, 0, state.PausedPrograms)
+	assert.Equal(t, int64(0), state.PausesTotal)
 	require.Contains(t, state.Pods, endpoints[0].GetMetadata().ID.String())
 	assert.Equal(t, 1, state.Pods[endpoints[0].GetMetadata().ID.String()].Programs)
+	assert.Equal(t, 100.0, state.Pods[endpoints[0].GetMetadata().ID.String()].Tokens)
 }

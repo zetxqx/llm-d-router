@@ -39,22 +39,28 @@ type Config struct {
 	// counted.
 	UtilThreshold float64 `json:"utilThreshold"`
 	// ActingHalfLifeSeconds is the half-life applied to the committed tokens
-	// of a program with no request in flight. 0 disables decay.
+	// of a program with no request in flight, in the admission view only.
+	// Upstream ThunderAgent uses a fixed 2^-t with t in seconds, i.e. 1. 0
+	// disables decay.
 	ActingHalfLifeSeconds float64 `json:"actingHalfLifeSeconds"`
 	// BufferTokensPerProgram is added to a program's footprint in the working
 	// set and in the admission fit check, reserving growth room for the
 	// context a session accumulates across its turns.
 	BufferTokensPerProgram int64 `json:"bufferTokensPerProgram"`
-	// ShedIdleSeconds enables proactive shedding: when a pod's working set
-	// exceeds the fit ceiling, its idle programs (no request in flight, idle
-	// at least this long) are unbound smallest first until the pod is back
-	// under the ceiling. A shed program's next turn re-enters admission as a
-	// new program: fit-checked, re-placed, held if nothing fits. 0 disables
-	// shedding; over-admitted pods then rely on the engine's own eviction.
-	ShedIdleSeconds float64 `json:"shedIdleSeconds"`
+	// PauseSweepSeconds is how often the pause sweep runs per pod (upstream
+	// scheduler_interval). While a pod's undecayed working set exceeds the
+	// fit ceiling, the sweep pauses its idle programs smallest first and, when
+	// none are left, marks every in-flight program to pause at the end of its
+	// turn. 0 sweeps on every dispatch cycle.
+	PauseSweepSeconds float64 `json:"pauseSweepSeconds"`
+	// KVUsageCorrection subtracts, per pod, the difference between the
+	// estimated footprint of in-flight programs and the engine's reported KV
+	// usage (upstream shared_tokens). Upstream never activates this path, so
+	// it is off by default; it needs real scraped capacity and metrics.
+	KVUsageCorrection bool `json:"kvUsageCorrection"`
 	// HeadWaitStarvationMs promotes any queue whose head has waited at least
-	// this long ahead of class and size order. 0 disables the guard, which
-	// lets a large program starve behind smaller ones.
+	// this long ahead of class, size and fit. This is the forced-admission
+	// backstop (upstream _wait_for_resume timeout, 1800 s). 0 disables it.
 	HeadWaitStarvationMs float64 `json:"headWaitStarvationMs"`
 	// EvictionTTLSeconds is how long a program with no in-flight request and
 	// no activity is kept before its state is dropped.
@@ -76,9 +82,11 @@ type Config struct {
 func defaultConfig() Config {
 	return Config{
 		CapacityTokens:         4194304,
-		UtilThreshold:          0.9,
+		UtilThreshold:          1.0,
+		ActingHalfLifeSeconds:  1,
 		BufferTokensPerProgram: 100,
-		HeadWaitStarvationMs:   30000,
+		PauseSweepSeconds:      5,
+		HeadWaitStarvationMs:   1800000,
 		EvictionTTLSeconds:     3600,
 		EvictionSweepSeconds:   300,
 		SessionFinalHeader:     "x-session-final",
@@ -99,8 +107,8 @@ func (c Config) validate() error {
 	if c.BufferTokensPerProgram < 0 {
 		return fmt.Errorf("bufferTokensPerProgram must be >= 0, got %d", c.BufferTokensPerProgram)
 	}
-	if c.ShedIdleSeconds < 0 {
-		return fmt.Errorf("shedIdleSeconds must be >= 0, got %v", c.ShedIdleSeconds)
+	if c.PauseSweepSeconds < 0 {
+		return fmt.Errorf("pauseSweepSeconds must be >= 0, got %v", c.PauseSweepSeconds)
 	}
 	if c.HeadWaitStarvationMs < 0 {
 		return fmt.Errorf("headWaitStarvationMs must be >= 0, got %v", c.HeadWaitStarvationMs)
@@ -110,6 +118,10 @@ func (c Config) validate() error {
 	}
 	if c.EvictionSweepSeconds <= 0 {
 		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
+	}
+	if c.EvictionTTLSeconds*1000 <= c.HeadWaitStarvationMs {
+		return fmt.Errorf("evictionTtlSeconds (%v s) must exceed headWaitStarvationMs (%v ms), or a held program is evicted mid-wait and re-enters as new",
+			c.EvictionTTLSeconds, c.HeadWaitStarvationMs)
 	}
 	if strings.TrimSpace(c.SessionFinalHeader) == "" {
 		return errors.New("sessionFinalHeader must not be empty")

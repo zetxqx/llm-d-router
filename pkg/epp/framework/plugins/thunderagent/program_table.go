@@ -41,6 +41,14 @@ type program struct {
 	// dispatchCount > 0 has KV state on its pod and classifies as REASONING
 	// for admission ordering.
 	dispatchCount int64
+	// paused is set by the pause sweep (or by a matured mark). A paused
+	// program counts against no pod, and its next turn must fit a pod again
+	// before it dispatches. podName is kept as the origin pod so the resume
+	// prefers the warm prefix cache.
+	paused bool
+	// markedForPause is set by the sweep on a program with a request in
+	// flight; it becomes paused when that turn's response completes.
+	markedForPause bool
 	// finalSeen records that the session-final header was observed; the
 	// program is released when that turn's response completes.
 	finalSeen bool
@@ -49,20 +57,35 @@ type program struct {
 	parentID string
 }
 
-// podLoad aggregates the programs bound to one pod.
+// podLoad aggregates the unpaused programs bound to one pod.
 type podLoad struct {
-	// tokens is the decayed working set: committed plus in-flight tokens.
-	tokens float64
-	// programs is the number of programs bound to the pod.
+	// decayed is the working set with idle programs decayed: the admission
+	// view (upstream remaining_capacity_with_decay).
+	decayed float64
+	// undecayed is the working set at full footprint: the pause view
+	// (upstream remaining_capacity).
+	undecayed float64
+	// running is the undecayed footprint of programs with a request in
+	// flight (upstream reasoning_program_tokens), input to the optional KV
+	// usage correction.
+	running float64
+	// programs is the number of unpaused programs bound to the pod.
 	programs int
 }
 
 // podSnapshot is one pod's capacity and working set as of the last
-// Saturation refresh. The fairness policy's admission fit check reads it.
+// Saturation refresh. The fairness policy's admission fit check reads room.
 type podSnapshot struct {
-	capacity  float64
-	tokens    float64 // decayed working set plus per-program buffers
+	capacity float64
+	// tokens is the undecayed working set plus per-program buffers, the
+	// quantity the pause sweep enforces.
+	tokens float64
+	// room is the decayed admission room before live reservations:
+	// capacity * utilThreshold - decayed working set - buffers.
+	room      float64
 	updatedAt time.Time
+	// sweptAt is when the pause sweep last ran for this pod.
+	sweptAt time.Time
 }
 
 // pendingAdmission reserves room for a new program the fairness policy has
@@ -100,9 +123,10 @@ type programTable struct {
 	snapshot map[string]*podSnapshot
 	// pending holds admission reservations keyed by program ID.
 	pending map[string]pendingAdmission
-	// shedsTotal counts programs unbound by the shed path, mirrored into the
-	// state dump alongside the Prometheus counter.
-	shedsTotal int64
+	// pausesTotal and resumesTotal mirror the Prometheus counters into the
+	// state dump.
+	pausesTotal  int64
+	resumesTotal int64
 }
 
 func newProgramTable(cfg Config) *programTable {
@@ -132,21 +156,28 @@ func (t *programTable) pendingOn(pod string, now time.Time) float64 {
 	return total
 }
 
-// programTokens returns a program's current footprint: the larger of its
+// footprint returns a program's undecayed footprint: the larger of its
 // in-flight estimate and its committed tokens. A turn's prefill covers the
 // program's previous context (each agentic turn resends the whole history as
 // a prefix), so during a turn the new estimate and the old committed total
-// describe the same KV and summing them double counts -- which inflates the
-// working set for exactly the duration of a turn and makes shed and
-// admission chase a phantom. A program with no request in flight is between
-// requests (typically running a tool); its committed tokens decay with the
-// configured half-life because the engine gradually evicts its KV blocks.
-// Callers must hold t.mu.
-func (t *programTable) programTokens(st *program, now time.Time) float64 {
+// describe the same KV and summing them double counts. This is the pause
+// view (upstream total_tokens).
+func footprint(st *program) float64 {
 	tokens := float64(st.committedTokens)
 	if f := float64(st.inflightTokens); f > tokens {
 		tokens = f
 	}
+	return tokens
+}
+
+// decayedFootprint returns the footprint with idle decay applied: a program
+// with no request in flight is between requests (typically running a tool),
+// and its committed tokens decay with the configured half-life because the
+// engine gradually evicts its KV blocks. Programs with a request in flight
+// count in full. This is the admission view (upstream
+// remaining_capacity_with_decay). Callers must hold t.mu.
+func (t *programTable) decayedFootprint(st *program, now time.Time) float64 {
+	tokens := footprint(st)
 	if st.inflightTokens > 0 || t.actingHalfLife <= 0 || st.lastResponseAt.IsZero() {
 		return tokens
 	}
@@ -157,13 +188,22 @@ func (t *programTable) programTokens(st *program, now time.Time) float64 {
 	return float64(st.committedTokens) * math.Exp2(-float64(elapsed)/float64(t.actingHalfLife))
 }
 
-// podLoads aggregates the decayed footprint and program count per pod, keyed
-// by endpoint ID. Callers must hold t.mu.
+// podLoads aggregates the unpaused programs per pod, keyed by endpoint ID.
+// Paused programs count against no pod (upstream unregisters them from the
+// backend). Callers must hold t.mu.
 func (t *programTable) podLoads(now time.Time) map[string]podLoad {
 	loads := make(map[string]podLoad)
 	for _, st := range t.programs {
+		if st.paused {
+			continue
+		}
 		load := loads[st.podName]
-		load.tokens += t.programTokens(st, now)
+		full := footprint(st)
+		load.undecayed += full
+		load.decayed += t.decayedFootprint(st, now)
+		if st.inflightTokens > 0 {
+			load.running += full
+		}
 		load.programs++
 		loads[st.podName] = load
 	}
@@ -171,22 +211,22 @@ func (t *programTable) podLoads(now time.Time) map[string]podLoad {
 }
 
 // classAndTokens returns the admission class and footprint for a program.
-// REASONING requires being bound: the bypass is justified by the footprint
-// already counting against a pod. A shed (unbound) program with history is
-// RESUMING: fit-checked like a new program, but ranked ahead of
-// never-admitted ones. Its footprint is its full committed tokens,
-// undecayed, because readmission re-prefills the whole context regardless
-// of how long it sat idle. An unknown program is NEW with no footprint.
-// Callers must hold t.mu.
-func (t *programTable) classAndTokens(id string, now time.Time) (programClass, float64) {
+// REASONING requires being bound and unpaused: the bypass is justified by the
+// footprint already counting against a pod. A paused program with history is
+// PAUSED: fit-checked like a new program, but ranked ahead of never-admitted
+// ones. Its footprint is its committed tokens; Pick raises it to the new
+// turn's estimate when that is larger, as upstream re-estimates before the
+// program waits. An unknown program is NEW with no footprint. Callers must
+// hold t.mu.
+func (t *programTable) classAndTokens(id string) (programClass, float64) {
 	st, ok := t.programs[id]
 	if !ok || st.dispatchCount == 0 {
 		return classNew, 0
 	}
-	if st.podName == "" {
-		return classResuming, float64(st.committedTokens)
+	if st.paused {
+		return classPaused, float64(st.committedTokens)
 	}
-	return classReasoning, t.programTokens(st, now)
+	return classReasoning, footprint(st)
 }
 
 // estimateTokens converts a request body size to a token estimate using the

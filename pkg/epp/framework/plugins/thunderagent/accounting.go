@@ -29,12 +29,12 @@ import (
 )
 
 // PreRequest attributes the request's estimated prompt tokens to the picked
-// endpoint's program, binds (or rebinds) the program to that endpoint, and
-// stashes the estimate on the request for ResponseBody to remove. The
-// director guarantees ResponseBody runs (with EndOfStream) for every request
-// that picked a pod, including aborted ones, so the estimate cannot leak.
-// The session-final and parent-session headers are read here so no separate
-// header hook is needed.
+// endpoint's program, binds (or rebinds) the program to that endpoint,
+// resumes it if it was paused, and stashes the estimate on the request for
+// ResponseBody to remove. The director guarantees ResponseBody runs (with
+// EndOfStream) for every request that picked a pod, including aborted ones,
+// so the estimate cannot leak. The session-final and parent-session headers
+// are read here so no separate header hook is needed.
 func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, schedulingResult *fwksched.SchedulingResult) error {
 	id := programID(request)
 	if id == "" {
@@ -56,6 +56,13 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 	delete(t.pending, id) // the program is bound and counted; drop its admission reservation
 	rebound := st.podName != "" && st.podName != podName
+	// A program picked as REASONING can be paused by the sweep in the cycle
+	// between Pick and PreRequest; resuming it here is the harmless outcome.
+	// A pause mark is left alone: an overlapping turn of a marked program
+	// still pauses once all its turns drain (upstream pauses on the first
+	// completed response).
+	resumed := st.paused
+	st.paused = false
 	st.podName = podName
 	st.inflightTokens += estimate
 	st.dispatchCount++
@@ -72,23 +79,49 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 		a.metrics.rebinds.Inc()
 		log.FromContext(ctx).V(logutil.DEBUG).Info("thunderagent.rebind", "pod", podName)
 	}
-	request.PutAttribute(inflightEstimateKey, estimate)
+	if resumed {
+		a.metrics.resumes.Inc()
+		log.FromContext(ctx).V(logutil.DEBUG).Info("thunderagent.resume", "pod", podName)
+	}
+	request.PutAttribute(inflightStateKey, inflightState{estimate: estimate, applied: estimate})
 	return nil
 }
 
-// ResponseBody acts on the final stream chunk only. It removes the in-flight
-// estimate recorded by PreRequest, replaces the program's committed footprint
-// with the usage-reported total, refines the size-to-token estimator, and
-// releases the program when its session-final turn completes.
+// ResponseBody tracks a turn's growth while it streams and settles the
+// program when it ends.
+//
+// On intermediate chunks it raises the in-flight amount by the streamed
+// events every streamingUpdateEvents (upstream update_program_tokens_streaming
+// counts SSE events every 20). On the final chunk it removes the amount
+// applied so far, replaces the program's committed footprint with the
+// usage-reported total, refines the size-to-token estimator, matures a pause
+// mark set by the sweep, and releases the program when its session-final turn
+// completes.
 func (a *ThunderAgent) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *fwkrc.Response, _ *datalayer.EndpointMetadata) {
-	if request == nil || response == nil || !response.EndOfStream {
+	if request == nil || response == nil {
 		return
 	}
 	id := programID(request)
 	if id == "" {
 		return
 	}
-	estimate, _ := fwksched.ReadRequestAttribute[int64](request, inflightEstimateKey)
+	state, _ := fwksched.ReadRequestAttribute[inflightState](request, inflightStateKey)
+
+	if !response.EndOfStream {
+		target := state.estimate + int64(response.StreamedEvents)
+		if target-state.applied < streamingUpdateEvents {
+			return
+		}
+		t := a.table
+		t.mu.Lock()
+		if st, ok := t.programs[id]; ok {
+			st.inflightTokens += target - state.applied
+		}
+		t.mu.Unlock()
+		state.applied = target
+		request.PutAttribute(inflightStateKey, state)
+		return
+	}
 
 	now := time.Now()
 	t := a.table
@@ -101,18 +134,27 @@ func (a *ThunderAgent) ResponseBody(ctx context.Context, request *fwksched.Infer
 		t.mu.Unlock()
 		return
 	}
-	st.inflightTokens -= estimate
+	st.inflightTokens -= state.applied
 	if st.inflightTokens < 0 {
 		st.inflightTokens = 0
 	}
 	switch {
 	case response.Usage.TotalTokens > 0:
 		st.committedTokens = int64(response.Usage.TotalTokens)
-	case estimate > st.committedTokens:
-		st.committedTokens = estimate
+	case state.estimate > st.committedTokens:
+		st.committedTokens = state.estimate
 	}
 	st.lastResponseAt = now
 	st.lastActivity = now
+
+	// A mark set by the sweep matures once the program has no turn in
+	// flight (upstream pauses in update_program_after_request).
+	pausedNow := st.markedForPause && st.inflightTokens == 0 && !st.finalSeen
+	if pausedNow {
+		st.markedForPause = false
+		st.paused = true
+		t.pausesTotal++
+	}
 
 	release := st.finalSeen && st.inflightTokens == 0
 	var freed int64
@@ -122,6 +164,10 @@ func (a *ThunderAgent) ResponseBody(ctx context.Context, request *fwksched.Infer
 	}
 	t.mu.Unlock()
 
+	if pausedNow {
+		a.metrics.pauses.Inc()
+		log.FromContext(ctx).V(logutil.DEBUG).Info("thunderagent.pause_marked")
+	}
 	if release {
 		a.metrics.sessionFinalReleases.Inc()
 		log.FromContext(ctx).Info("thunderagent.release_final", "freed_tokens", freed)

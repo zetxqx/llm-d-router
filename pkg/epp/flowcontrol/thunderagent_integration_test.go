@@ -85,6 +85,30 @@ func runTurn(t *testing.T, ta *thunderagent.ThunderAgent, programID string, tota
 		&fwkrc.Response{EndOfStream: true, Usage: requesthandling.Usage{TotalTokens: totalTokens, PromptTokens: totalTokens}}, nil)
 }
 
+// startTurn drives PreRequest for a program on the test pod without completing
+// the turn, leaving the program with a request in flight (upstream REASONING
+// on GPU). endTurn completes it with the given usage.
+func startTurn(t *testing.T, ta *thunderagent.ThunderAgent, programID string, sizeBytes int) *fwksched.InferenceRequest {
+	t.Helper()
+	endpoint := fwksched.NewEndpoint(
+		&datalayer.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "pod-1"}},
+		&datalayer.Metrics{}, nil)
+	req := &fwksched.InferenceRequest{RequestID: "turn-" + programID, FairnessID: programID, RequestSizeBytes: sizeBytes}
+	result := &fwksched.SchedulingResult{
+		PrimaryProfileName: "default",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+		},
+	}
+	require.NoError(t, ta.PreRequest(context.Background(), req, result))
+	return req
+}
+
+func endTurn(ta *thunderagent.ThunderAgent, req *fwksched.InferenceRequest, totalTokens int) {
+	ta.ResponseBody(context.Background(), req,
+		&fwkrc.Response{EndOfStream: true, Usage: requesthandling.Usage{TotalTokens: totalTokens, PromptTokens: totalTokens}}, nil)
+}
+
 // enqueueTurn submits one queued turn for a program through the real
 // controller and reports its outcome on the returned channel.
 func enqueueTurn(h *integrationHarness, programID string) <-chan dispatchResult {
@@ -125,7 +149,9 @@ func requireDispatched(t *testing.T, done <-chan dispatchResult, d time.Duration
 }
 
 // A pod at 1000-token capacity with utilThreshold 0.9 admits new programs
-// while the working set plus their estimate stays within 900 tokens.
+// while the working set plus their estimate stays within 900 tokens. The
+// pause sweep is parked (3600 s) so these tests exercise the admission view
+// alone; the pause path has its own test below.
 const thunderParams = `{
 	"capacityTokens": 1000,
 	"utilThreshold": 0.9,
@@ -134,7 +160,8 @@ const thunderParams = `{
 	"headWaitStarvationMs": %g,
 	"evictionTtlSeconds": 3600,
 	"evictionSweepSeconds": 300,
-	"sessionFinalHeader": "x-session-final"
+	"sessionFinalHeader": "x-session-final",
+	"pauseSweepSeconds": 3600
 }`
 
 func TestThunderAgentHoldsUntilTurnCompletes(t *testing.T) {
@@ -230,9 +257,9 @@ func TestThunderAgentResumesReasoningBeforeNew(t *testing.T) {
 		"the in-trajectory program resumes before the new one regardless of enqueue order")
 }
 
-// A pod at 1000-token capacity, 900-token admission ceiling, with shedding
-// enabled on a 1ms idle bound.
-const thunderShedParams = `{
+// A pod at 1000-token capacity, 900-token admission ceiling, with the pause
+// sweep running on every dispatch cycle.
+const thunderPauseParams = `{
 	"capacityTokens": 1000,
 	"utilThreshold": 0.9,
 	"actingHalfLifeSeconds": 0,
@@ -241,26 +268,26 @@ const thunderShedParams = `{
 	"evictionTtlSeconds": 3600,
 	"evictionSweepSeconds": 300,
 	"sessionFinalHeader": "x-session-final",
-	"shedIdleSeconds": 0.001
+	"pauseSweepSeconds": 0
 }`
 
-func shedsTotal(t *testing.T, ta *thunderagent.ThunderAgent) int64 {
+func pausesTotal(t *testing.T, ta *thunderagent.ThunderAgent) int64 {
 	t.Helper()
 	raw, err := ta.DumpState()
 	require.NoError(t, err)
 	var state struct {
-		ShedsTotal int64 `json:"shedsTotal"`
+		PausesTotal int64 `json:"pausesTotal"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &state))
-	return state.ShedsTotal
+	return state.PausesTotal
 }
 
-// A shed mid-trajectory session and a never-admitted one wait together; when
-// capacity frees and both fit, the shed session resumes first even though
+// A paused mid-trajectory session and a never-admitted one wait together;
+// when capacity frees and both fit, the paused session resumes first even though
 // the newcomer is smaller and enqueued earlier.
-func TestThunderAgentShedReturneeResumesBeforeNewcomer(t *testing.T) {
+func TestThunderAgentPausedReturneeResumesBeforeNewcomer(t *testing.T) {
 	t.Parallel()
-	ta := newThunderForIntegration(t, thunderShedParams)
+	ta := newThunderForIntegration(t, thunderPauseParams)
 	h := newHarness(t, harnessOpts{
 		detector:           ta,
 		fairness:           ta,
@@ -268,12 +295,12 @@ func TestThunderAgentShedReturneeResumesBeforeNewcomer(t *testing.T) {
 	})
 
 	// The veteran ran a turn (400 committed); the runner fills the rest.
-	// 1300 > 900 puts the pod over the ceiling and the dispatch loop sheds
+	// 1300 > 900 puts the pod over the ceiling and the dispatch loop pauses
 	// the smaller idle program: the veteran.
 	runTurn(t, ta, "veteran", 400)
 	runTurn(t, ta, "runner", 900)
-	require.Eventually(t, func() bool { return shedsTotal(t, ta) >= 1 }, 5*time.Second, time.Millisecond,
-		"the over-ceiling pod should shed its smaller idle program")
+	require.Eventually(t, func() bool { return pausesTotal(t, ta) >= 1 }, 5*time.Second, time.Millisecond,
+		"the over-ceiling pod should pause its smaller idle program")
 
 	// Both wait: room is 900 - 900 = 0. The newcomer is smaller (est 300 vs
 	// the veteran's 400 committed) and enqueues first.
@@ -307,5 +334,90 @@ func TestThunderAgentShedReturneeResumesBeforeNewcomer(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, []string{"veteran", "newcomer"}, order,
-		"the shed mid-trajectory session resumes before the never-admitted one")
+		"the paused mid-trajectory session resumes before the never-admitted one")
+}
+
+// The mark path end to end: with every program on the pod running, the
+// sweep marks them; a marked program pauses when its turn completes; its next
+// turn is then held until the other program finishes and frees room.
+func TestThunderAgentMarkedProgramPausesAtEndOfTurnAndIsHeld(t *testing.T) {
+	t.Parallel()
+	ta := newThunderForIntegration(t, thunderPauseParams)
+	h := newHarness(t, harnessOpts{
+		detector:           ta,
+		fairness:           ta,
+		endpointCandidates: thunderCandidates(),
+	})
+
+	// The pod crosses the ceiling only while both programs are in flight:
+	// the runner (500 committed) starts a turn, then the filler's first turn
+	// arrives with a 450-token estimate. 950 > 900 with nothing idle, so the
+	// dispatch loop's sweep marks both instead of pausing either. (Seeding
+	// the filler with a completed turn first would leave an idle window in
+	// which the 1 ms sweep pauses it outright.)
+	runTurn(t, ta, "runner", 500)
+	runnerReq := startTurn(t, ta, "runner", 400)
+	fillerReq := startTurn(t, ta, "filler", 1800)
+	time.Sleep(50 * time.Millisecond) // several dispatch cycles
+	require.Equal(t, int64(0), pausesTotal(t, ta), "in-flight programs are marked, never paused outright")
+	require.Equal(t, 2, dumpField(t, ta, "totalPrograms"))
+
+	// The runner's turn completes: its mark matures into a pause, synchronously.
+	endTurn(ta, runnerReq, 500)
+	require.Equal(t, int64(1), pausesTotal(t, ta), "a marked program pauses when its turn ends")
+
+	// Its next turn must fit again: 500 into 900 - 450 (filler still running) = 450 does not.
+	runnerDone := enqueueTurn(h, "runner")
+	requireHeld(t, runnerDone, 300*time.Millisecond)
+
+	// The filler finishes small: room opens and the paused runner resumes.
+	endTurn(ta, fillerReq, 100)
+	requireDispatched(t, runnerDone, 5*time.Second)
+}
+
+// Forced admission of a paused program: nothing frees, and the backstop
+// dispatches it once its head has waited headWaitStarvationMs.
+func TestThunderAgentForcedAdmissionOfPausedProgram(t *testing.T) {
+	t.Parallel()
+	ta := newThunderForIntegration(t, thunderPauseParamsStarve)
+	h := newHarness(t, harnessOpts{
+		detector:           ta,
+		fairness:           ta,
+		endpointCandidates: thunderCandidates(),
+	})
+
+	runTurn(t, ta, "veteran", 400)
+	runTurn(t, ta, "runner", 900) // 1300 > 900: the veteran is paused
+	require.Eventually(t, func() bool { return pausesTotal(t, ta) >= 1 }, 5*time.Second, time.Millisecond)
+
+	started := time.Now()
+	done := enqueueTurn(h, "veteran")
+	requireHeld(t, done, 150*time.Millisecond)
+	requireDispatched(t, done, 5*time.Second)
+	assert.GreaterOrEqual(t, time.Since(started), 300*time.Millisecond,
+		"dispatch came from the forced-admission backstop, not from a fit")
+}
+
+// Same pod and ceiling as thunderPauseParams, with a 300 ms forced-admission
+// backstop.
+const thunderPauseParamsStarve = `{
+	"capacityTokens": 1000,
+	"utilThreshold": 0.9,
+	"actingHalfLifeSeconds": 0,
+	"bufferTokensPerProgram": 0,
+	"headWaitStarvationMs": 300,
+	"evictionTtlSeconds": 3600,
+	"evictionSweepSeconds": 300,
+	"sessionFinalHeader": "x-session-final",
+	"pauseSweepSeconds": 0
+}`
+
+func dumpField(t *testing.T, ta *thunderagent.ThunderAgent, field string) int {
+	t.Helper()
+	raw, err := ta.DumpState()
+	require.NoError(t, err)
+	var state map[string]any
+	require.NoError(t, json.Unmarshal(raw, &state))
+	v, _ := state[field].(float64)
+	return int(v)
 }

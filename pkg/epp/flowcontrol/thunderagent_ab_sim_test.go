@@ -155,7 +155,7 @@ type armResult struct {
 	makespan        time.Duration
 	holds           int64
 	heldTime        time.Duration
-	sheds           int64
+	pauses          int64
 }
 
 func collect(pods []*simPod, makespan time.Duration, holds int64, heldTime time.Duration) armResult {
@@ -197,12 +197,15 @@ func runBaselineArm(t *testing.T) armResult {
 // thunderSimParams sizes admission so ~3 sessions fit a pod at their grown
 // size: a session arrives at 300 tokens and grows to 550, so the 250-token
 // buffer makes its projected footprint 550 and the 1800-token fit ceiling
-// (0.9 x 2000) admits three per pod. The mild half-life decays 4% across a
-// 30ms tool gap, so footprints are effectively kept between turns.
+// (0.9 x 2000) admits three per pod. Time runs about 10x faster than the real
+// trace (30ms tool gaps against a 0.31s median), so upstream's 1 s half-life
+// and 5 s sweep scale to 0.1 s and 0.5 s: an idle session keeps 81% of its
+// footprint across a gap and the sweep fires a few times per run.
 const thunderSimParams = `{
 	"capacityTokens": 2000,
 	"utilThreshold": 0.9,
-	"actingHalfLifeSeconds": 0.5,
+	"actingHalfLifeSeconds": 0.1,
+	"pauseSweepSeconds": 0.5,
 	"bufferTokensPerProgram": 250,
 	"headWaitStarvationMs": 30000,
 	"evictionTtlSeconds": 3600,
@@ -350,10 +353,10 @@ func runThunderCohorts(t *testing.T, params string, cohorts []cohortSpec) (armRe
 	result := collect(pods, time.Since(start), holds, time.Duration(heldNanos))
 	if raw, err := ta.DumpState(); err == nil {
 		var state struct {
-			ShedsTotal int64 `json:"shedsTotal"`
+			PausesTotal int64 `json:"pausesTotal"`
 		}
 		if json.Unmarshal(raw, &state) == nil {
-			result.sheds = state.ShedsTotal
+			result.pauses = state.PausesTotal
 		}
 	}
 	return result, stats

@@ -32,13 +32,73 @@ import (
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
-// testConfig returns a config with round numbers and no growth buffer so
-// tests can assert exact utilization values.
+// testConfig returns a config with round numbers, no growth buffer, no decay,
+// a 0.9 ceiling (900 tokens on a 1000-token pod) and a pause sweep on every
+// Saturation call, so tests can assert exact values. The production defaults
+// (1 s half-life, ceiling 1.0, 5 s sweep) are asserted in plugin_test.go.
 func testConfig() Config {
 	cfg := defaultConfig()
 	cfg.CapacityTokens = 1000
 	cfg.BufferTokensPerProgram = 0
+	cfg.UtilThreshold = 0.9
+	cfg.ActingHalfLifeSeconds = 0
+	cfg.PauseSweepSeconds = 0
+	cfg.KVUsageCorrection = false
 	return cfg
+}
+
+func isPaused(a *ThunderAgent, id string) bool {
+	a.table.mu.Lock()
+	defer a.table.mu.Unlock()
+	st, ok := a.table.programs[id]
+	return ok && st.paused
+}
+
+func isMarked(a *ThunderAgent, id string) bool {
+	a.table.mu.Lock()
+	defer a.table.mu.Unlock()
+	st, ok := a.table.programs[id]
+	return ok && st.markedForPause
+}
+
+// forcePause puts a program into the paused state directly, as the sweep
+// would, keeping its binding as the origin pod.
+func forcePause(a *ThunderAgent, id string) {
+	a.table.mu.Lock()
+	a.table.programs[id].paused = true
+	a.table.mu.Unlock()
+}
+
+func snapshotOf(a *ThunderAgent, pod string) *podSnapshot {
+	a.table.mu.Lock()
+	defer a.table.mu.Unlock()
+	return a.table.snapshot[pod]
+}
+
+func reservationOf(a *ThunderAgent, id string) (pendingAdmission, bool) {
+	a.table.mu.Lock()
+	defer a.table.mu.Unlock()
+	p, ok := a.table.pending[id]
+	return p, ok
+}
+
+// endpointWithUsage builds a datalayer endpoint with real scraped capacity and
+// a fresh KV usage sample, as the metrics extractor would.
+func endpointWithUsage(name string, blockSize, numBlocks int, usage float64, sampled bool) fwkdl.Endpoint {
+	m := &fwkdl.Metrics{CacheBlockSize: blockSize, CacheNumBlocks: numBlocks, KVCacheUsagePercent: usage}
+	if sampled {
+		m.UpdateTime = time.Now()
+	}
+	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: name}}, m)
+}
+
+// inflightRequest starts a turn for a program without completing it, so the
+// program has a request in flight (upstream REASONING).
+func inflightRequest(t *testing.T, a *ThunderAgent, id string, endpoint fwksched.Endpoint, sizeBytes int) *fwksched.InferenceRequest {
+	t.Helper()
+	req := newRequest(id, sizeBytes)
+	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(endpoint)))
+	return req
 }
 
 func newTestAgent(cfg Config) *ThunderAgent {
@@ -111,6 +171,15 @@ func makeQueueWithBytes(id string, length int, headEnqueue time.Time, headBytes 
 			OriginalRequestV: fwkfcmocks.NewMockFlowControlRequest(headBytes, "req-"+id, fwkfc.FlowKey{ID: id}),
 		}
 	}
+	return q
+}
+
+// makeQueueWithRequest builds a queue whose head carries a scheduling request,
+// as the production adapter does, with a possibly different flow-control byte
+// size.
+func makeQueueWithRequest(id string, headEnqueue time.Time, req *fwksched.InferenceRequest, byteSize uint64) *fwkfcmocks.MockFlowQueueAccessor {
+	q := makeQueueWithBytes(id, 1, headEnqueue, byteSize)
+	q.PeekV.(*fwkfcmocks.MockQueueItemAccessor).OriginalRequestV.(*fwkfcmocks.MockFlowControlRequest).InferenceRequestV = req
 	return q
 }
 

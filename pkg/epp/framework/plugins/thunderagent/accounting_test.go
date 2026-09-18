@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -42,7 +43,7 @@ func TestInflightAndCommittedAccounting(t *testing.T) {
 	loads := a.table.podLoads(time.Now())
 	dispatched := a.table.programs["program-a"].dispatchCount
 	a.table.mu.Unlock()
-	assert.InDelta(t, 500.0, loads[pod1].tokens, 0.0001)
+	assert.InDelta(t, 500.0, loads[pod1].undecayed, 0.0001)
 	assert.Equal(t, int64(1), dispatched)
 
 	// The response reports 800 total tokens: the estimate is removed and the
@@ -52,7 +53,7 @@ func TestInflightAndCommittedAccounting(t *testing.T) {
 	a.table.mu.Lock()
 	loads = a.table.podLoads(time.Now())
 	a.table.mu.Unlock()
-	assert.InDelta(t, 800.0, loads[pod1].tokens, 0.0001)
+	assert.InDelta(t, 800.0, loads[pod1].undecayed, 0.0001)
 
 	// The next request of the same program replaces, not accumulates, the
 	// committed footprint.
@@ -63,7 +64,7 @@ func TestInflightAndCommittedAccounting(t *testing.T) {
 	a.table.mu.Lock()
 	loads = a.table.podLoads(time.Now())
 	a.table.mu.Unlock()
-	assert.InDelta(t, 900.0, loads[pod1].tokens, 0.0001)
+	assert.InDelta(t, 900.0, loads[pod1].undecayed, 0.0001)
 }
 
 func TestAbortedRequestReleasesEstimate(t *testing.T) {
@@ -99,7 +100,8 @@ func TestActingDecay(t *testing.T) {
 	a.table.programs["program-a"].lastResponseAt = time.Now().Add(-10 * time.Second)
 	loads := a.table.podLoads(time.Now())
 	a.table.mu.Unlock()
-	assert.InDelta(t, 400.0, loads[pod1].tokens, 10.0)
+	assert.InDelta(t, 400.0, loads[pod1].decayed, 10.0)
+	assert.InDelta(t, 800.0, loads[pod1].undecayed, 0.0001, "the pause view does not decay")
 }
 
 func TestAnonymousRequestsAreNotTracked(t *testing.T) {
@@ -147,8 +149,8 @@ func TestRebindMovesProgram(t *testing.T) {
 	a.table.mu.Lock()
 	loads := a.table.podLoads(time.Now())
 	a.table.mu.Unlock()
-	assert.Zero(t, loads[endpoints[0].GetMetadata().ID.String()].tokens)
-	assert.InDelta(t, 300.0, loads[endpoints[1].GetMetadata().ID.String()].tokens, 0.0001)
+	assert.Zero(t, loads[endpoints[0].GetMetadata().ID.String()].undecayed)
+	assert.InDelta(t, 300.0, loads[endpoints[1].GetMetadata().ID.String()].undecayed, 0.0001)
 }
 
 func TestEviction(t *testing.T) {
@@ -172,4 +174,60 @@ func TestEviction(t *testing.T) {
 	a.table.mu.Unlock()
 	assert.False(t, idleKept, "idle program past TTL should be evicted")
 	assert.True(t, busyKept, "in-flight program should be kept")
+}
+
+// Mid-turn growth: streamed events raise the in-flight amount every
+// streamingUpdateEvents (upstream counts SSE events every 20), and end of
+// stream removes exactly what was applied.
+func TestStreamingChunksRaiseInflight(t *testing.T) {
+	a := newTestAgent(testConfig())
+	endpoints := newTestEndpoints("pod1")
+
+	req := newRequest("program-a", 2000) // 500-token estimate
+	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(endpoints[0])))
+
+	inflight := func() int64 {
+		a.table.mu.Lock()
+		defer a.table.mu.Unlock()
+		return a.table.programs["program-a"].inflightTokens
+	}
+
+	a.ResponseBody(context.Background(), req, &fwkrc.Response{StreamedEvents: 10}, nil)
+	assert.Equal(t, int64(500), inflight(), "under the update threshold nothing changes")
+
+	a.ResponseBody(context.Background(), req, &fwkrc.Response{StreamedEvents: 25}, nil)
+	assert.Equal(t, int64(525), inflight(), "25 events past the estimate are applied")
+
+	a.ResponseBody(context.Background(), req, &fwkrc.Response{StreamedEvents: 30}, nil)
+	assert.Equal(t, int64(525), inflight(), "5 more events stay below the threshold")
+
+	a.ResponseBody(context.Background(), req, endOfStream(800, 500), nil)
+	a.table.mu.Lock()
+	st := a.table.programs["program-a"]
+	a.table.mu.Unlock()
+	assert.Equal(t, int64(0), st.inflightTokens, "end of stream removes the applied amount, not just the estimate")
+	assert.Equal(t, int64(800), st.committedTokens)
+}
+
+func TestPreRequestResumesPausedProgram(t *testing.T) {
+	a := newTestAgent(testConfig())
+	endpoints := newTestEndpoints("pod1")
+
+	seedProgram(t, a, "program-a", endpoints[0], 300)
+	forcePause(a, "program-a")
+
+	a.table.mu.Lock()
+	loads := a.table.podLoads(time.Now())
+	a.table.mu.Unlock()
+	assert.Zero(t, loads[endpoints[0].GetMetadata().ID.String()].undecayed, "a paused program counts against no pod")
+
+	req := newRequest("program-a", 0)
+	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(endpoints[0])))
+
+	assert.False(t, isPaused(a, "program-a"))
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.resumes))
+	a.table.mu.Lock()
+	loads = a.table.podLoads(time.Now())
+	a.table.mu.Unlock()
+	assert.InDelta(t, 300.0, loads[endpoints[0].GetMetadata().ID.String()].undecayed, 0.0001, "the footprint counts again once resumed")
 }

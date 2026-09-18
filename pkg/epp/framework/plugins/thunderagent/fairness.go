@@ -30,20 +30,18 @@ import (
 type programClass int
 
 const (
-	// classReasoning is a program that has been served before and has a
-	// request waiting. Its footprint is already counted in the working set
-	// and finishing its trajectory is what returns capacity to the pool, so
-	// it always dispatches.
+	// classReasoning is an admitted, unpaused program with a request waiting.
+	// Its footprint is already counted in the working set and finishing its
+	// trajectory is what returns capacity to the pool, so it always
+	// dispatches (upstream: an ACTIVE program's request is proxied
+	// unchecked).
 	classReasoning programClass = iota
-	// classResuming is a shed program whose next turn is waiting. It must
-	// fit a pod again (its footprint stopped counting when it was shed), but
-	// it outranks never-admitted programs: it is mid-trajectory with sunk
-	// work, and finishing it releases capacity permanently, where admitting
-	// a new program signs up a whole trajectory of future turns. A new
-	// program's smaller arrival size is also transient; it grows to full
-	// size after admission, so size ordering across the two would prefer the
-	// wrong candidate for a reason that disappears immediately.
-	classResuming
+	// classPaused is a paused program whose next turn is waiting. It must
+	// fit a pod again (its footprint stopped counting when it was paused),
+	// but it outranks never-admitted programs (upstream _greedy_resume puts
+	// REASONING programs with step > 1 first): it is mid-trajectory with
+	// sunk work, and finishing it releases capacity permanently.
+	classPaused
 	// classNew is a program whose first request is waiting. It is admitted
 	// only when its projected footprint fits a pod under the utilThreshold
 	// ceiling.
@@ -54,42 +52,42 @@ func (c programClass) String() string {
 	switch c {
 	case classReasoning:
 		return "reasoning"
-	case classResuming:
-		return "resuming"
+	case classPaused:
+		return "paused"
 	default:
 		return "new"
 	}
 }
 
-// holdWaitFloor separates saturation holds from normal dispatch latency in
+// holdWaitFloor separates admission holds from normal dispatch latency in
 // the holds metric: a request that waited at least this long in the
 // flow-control queue counts as held.
 const holdWaitFloor = time.Second
 
 // Pick selects the queue to service next.
 //
-// Turns of admitted (REASONING) programs bypass admission: smallest decayed
-// footprint first, then the oldest head. New programs are considered only
-// after them, smallest projected footprint first, and each must fit a pod:
-// working set plus live reservations plus the program's estimate and growth
-// buffer, within utilThreshold of the pod's capacity. A fitting new program
-// gets a reservation charged to the pod that fit it, released when
-// PreRequest binds the program. A head waiting past headWaitStarvationMs
-// dispatches regardless of class, size, or fit, oldest first; for a new
-// program this is the forced-admission backstop.
+// Turns of admitted (REASONING) programs bypass admission: smallest footprint
+// first, then the oldest head. Paused programs are considered next, then new
+// programs, smallest footprint first within each class, and each must fit a
+// pod: decayed working set plus live reservations plus the program's size and
+// growth buffer, within utilThreshold of the pod's capacity. A paused program
+// is sized at the larger of its committed tokens and the new turn's estimate
+// (upstream re-estimates before the program waits) and prefers its origin
+// pod when that fits. A fitting program gets a reservation charged to the pod
+// that fit it, released when PreRequest binds the program. A head waiting
+// past headWaitStarvationMs dispatches regardless of class, size, or fit,
+// oldest first: the forced-admission backstop.
 //
-// Returning nil while non-fitting new programs wait is the hold: the
-// processor dispatches nothing and retries next cycle.
+// Returning nil while only non-fitting paused or new programs wait is the
+// hold: the processor dispatches nothing and retries next cycle.
 //
 // The fit view comes from the Saturation hook, so the plugin must be the
-// flow control saturation detector. Without a fit view, new programs are
+// flow control saturation detector. Without a fit view, programs are
 // admitted freely and only the class ordering remains.
 //
-// There is no ACTING class. Upstream ThunderAgent proactively pauses idle
-// programs, so its resume queue can hold a program with no request
-// outstanding; that program is ACTING. Flow control here only ever queues
-// actual requests, so every candidate has a request pending and is REASONING
-// by upstream's definition.
+// There is no ACTING class. Upstream ThunderAgent's resume pool can hold a
+// paused program with no request outstanding; flow control only ever queues
+// actual requests, so every candidate here has a request pending.
 func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor) (fwkfc.FlowQueueAccessor, error) {
 	if band == nil {
 		return nil, nil //nolint:nilnil
@@ -108,10 +106,11 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	}
 
 	var best *candidate
-	heldNew := 0
+	held := 0
 
 	t := a.table
 	t.mu.Lock()
+	pendingByPod := t.pendingByPod(now)
 	band.IterateQueues(func(queue fwkfc.FlowQueueAccessor) bool {
 		// Empty entries appear transiently when a queue drains between
 		// iteration and scoring; they carry nothing to service.
@@ -124,19 +123,24 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		}
 		id := queue.FlowKey().ID
 		waitMs := float64(now.Sub(head.EnqueueTime()).Milliseconds())
-		class, tokens := t.classAndTokens(id, now)
+		class, tokens := t.classAndTokens(id)
 		starving := a.headWaitStarvationMs > 0 && waitMs >= a.headWaitStarvationMs
 
 		fitPod := ""
 		if class != classReasoning {
-			// A resuming (shed) program carries its known committed
-			// footprint; a truly new one is estimated from its request size.
-			if tokens == 0 {
-				tokens = float64(t.estimateTokens(int(head.OriginalRequest().ByteSize())))
+			// The new turn resends the whole history, so its estimate is
+			// the program's size from now on; a paused program's committed
+			// tokens are the floor in case the estimate runs low.
+			if est := float64(t.estimateTokens(headSizeBytes(head))); est > tokens {
+				tokens = est
 			}
-			pod, ok := a.fitPodLocked(tokens+a.bufferTokensPerProgram, now)
+			preferred := ""
+			if class == classPaused {
+				preferred = t.programs[id].podName
+			}
+			pod, ok := a.fitPodLocked(tokens+a.bufferTokensPerProgram, preferred, pendingByPod)
 			if !ok && !starving {
-				heldNew++
+				held++
 				return true
 			}
 			fitPod = pod
@@ -159,41 +163,76 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	t.mu.Unlock()
 
 	if best == nil {
-		if heldNew > 0 {
-			logger.V(logutil.DEBUG).Info("thunderagent.hold", "held_new", heldNew)
+		if held > 0 {
+			logger.V(logutil.DEBUG).Info("thunderagent.hold", "held", held)
 		}
 		return nil, nil //nolint:nilnil
 	}
 
 	a.metrics.releases.WithLabelValues(best.class.String()).Inc()
-	held := best.waitMs >= float64(holdWaitFloor.Milliseconds())
-	if held {
+	wasHeld := best.waitMs >= float64(holdWaitFloor.Milliseconds())
+	if wasHeld {
 		a.metrics.holds.WithLabelValues(best.class.String()).Inc()
 	}
 	if best.starving {
 		a.metrics.starvationPromotions.Inc()
 	}
-	if held || best.starving {
+	if wasHeld || best.starving {
 		logger.V(logutil.DEBUG).Info("thunderagent.release",
 			"class", best.class.String(), "waited_ms", best.waitMs, "starved", best.starving)
 	}
 	return best.queue, nil
 }
 
-// fitPodLocked returns the pod with the most free admission room that fits
-// the required tokens, if any. Room is the utilThreshold share of capacity
-// minus the working set and live reservations. With no fit view the check
-// fails open: the plugin is then not wired as the saturation detector and
-// only class ordering applies. Callers must hold t.mu.
-func (a *ThunderAgent) fitPodLocked(required float64, now time.Time) (string, bool) {
+// headSizeBytes returns the request body size of a queue head, from the
+// scheduling request when the item carries one (the production adapter
+// does), else from the flow control item's byte size.
+func headSizeBytes(head fwkfc.QueueItemAccessor) int {
+	req := head.OriginalRequest()
+	if req == nil {
+		return 0
+	}
+	if ir := req.InferenceRequest(); ir != nil && ir.RequestSizeBytes > 0 {
+		return ir.RequestSizeBytes
+	}
+	return int(req.ByteSize())
+}
+
+// pendingByPod sums live reservations per pod, dropping expired ones.
+// Callers must hold t.mu.
+func (t *programTable) pendingByPod(now time.Time) map[string]float64 {
+	byPod := make(map[string]float64, len(t.snapshot))
+	for id, p := range t.pending {
+		if now.Sub(p.at) > pendingAdmissionTTL {
+			delete(t.pending, id)
+			continue
+		}
+		byPod[p.pod] += p.tokens
+	}
+	return byPod
+}
+
+// fitPodLocked returns the pod to admit a program of the required size onto,
+// if any. Room is the decayed admission room from the fit view minus live
+// reservations. The preferred pod (a paused program's origin, where its
+// prefix is warm) wins whenever it fits; otherwise the pod with the most room
+// is chosen. With no fit view the check fails open: the plugin is then not
+// wired as the saturation detector and only class ordering applies. Callers
+// must hold t.mu.
+func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingByPod map[string]float64) (string, bool) {
 	t := a.table
 	if len(t.snapshot) == 0 {
 		return "", true
 	}
+	if snap, ok := t.snapshot[preferred]; ok && preferred != "" {
+		if snap.room-pendingByPod[preferred] >= required {
+			return preferred, true
+		}
+	}
 	bestPod := ""
 	bestRoom := 0.0
 	for pod, snap := range t.snapshot {
-		room := snap.capacity*a.utilThreshold - snap.tokens - t.pendingOn(pod, now)
+		room := snap.room - pendingByPod[pod]
 		if room >= required && room > bestRoom {
 			bestPod, bestRoom = pod, room
 		}

@@ -148,7 +148,7 @@ type realArmResult struct {
 	hits, misses    int64
 	makespan        time.Duration
 	holds           int64
-	sheds           int64
+	pauses          int64
 	latencies       []time.Duration // per turn: admission wait + pod service time
 }
 
@@ -208,17 +208,18 @@ func runRealisticBaseline(t *testing.T, sessions []realSession) realArmResult {
 
 // realisticThunderParams: capacity matches the simulated pods; the growth
 // buffer is sized for the light class (heavier sessions overshoot it, which
-// is what shedding is for); shedding and mild decay are on.
+// is what the pause sweep is for). Time is compressed 1/100, so upstream's
+// 1 s half-life and 5 s scheduler tick scale to 0.01 s and 0.05 s.
 const realisticThunderParams = `{
 	"capacityTokens": 100000,
 	"utilThreshold": 0.9,
-	"actingHalfLifeSeconds": 0.5,
+	"actingHalfLifeSeconds": 0.01,
+	"pauseSweepSeconds": 0.05,
 	"bufferTokensPerProgram": 5000,
 	"headWaitStarvationMs": 30000,
 	"evictionTtlSeconds": 3600,
 	"evictionSweepSeconds": 300,
-	"sessionFinalHeader": "x-session-final",
-	"shedIdleSeconds": 0.02
+	"sessionFinalHeader": "x-session-final"
 }`
 
 // runRealisticThunder: the real plugin and flow controller, plugin-driven
@@ -323,10 +324,10 @@ func runRealisticThunder(t *testing.T, sessions []realSession) realArmResult {
 	}
 	if raw, err := ta.DumpState(); err == nil {
 		var state struct {
-			ShedsTotal int64 `json:"shedsTotal"`
+			PausesTotal int64 `json:"pausesTotal"`
 		}
 		if json.Unmarshal(raw, &state) == nil {
-			r.sheds = state.ShedsTotal
+			r.pauses = state.PausesTotal
 		}
 	}
 	return r
@@ -357,7 +358,7 @@ func TestThunderAgentOnRealisticWekaProfile(t *testing.T) {
 
 	t.Logf("workload: %d sessions (24 light / 15 medium / 9 heavy), %d turns, contexts %d..%d tokens (trace/8), 2 pods x %d-token KV, compaction on ~6%% of turns",
 		len(sessions), turns, 24_000/realTokenScale, (96_000+17*12_000)/realTokenScale, realPodCapacity)
-	t.Logf("%-18s %14s %8s %8s %10s %10s %10s %7s %7s", "arm", "prefill_tokens", "hits", "misses", "turn_p50", "turn_p95", "makespan", "holds", "sheds")
+	t.Logf("%-18s %14s %8s %8s %10s %10s %10s %7s %7s", "arm", "prefill_tokens", "hits", "misses", "turn_p50", "turn_p95", "makespan", "holds", "pauses")
 	t.Logf("%-18s %14d %8d %8d %10s %10s %10s %7d %7s", "session-affinity",
 		baseline.prefilledTokens, baseline.hits, baseline.misses,
 		percentile(baseline.latencies, 0.50).Round(time.Millisecond), percentile(baseline.latencies, 0.95).Round(time.Millisecond),
@@ -365,7 +366,7 @@ func TestThunderAgentOnRealisticWekaProfile(t *testing.T) {
 	t.Logf("%-18s %14d %8d %8d %10s %10s %10s %7d %7d", "thunder-agent",
 		thunder.prefilledTokens, thunder.hits, thunder.misses,
 		percentile(thunder.latencies, 0.50).Round(time.Millisecond), percentile(thunder.latencies, 0.95).Round(time.Millisecond),
-		thunder.makespan.Round(time.Millisecond), thunder.holds, thunder.sheds)
+		thunder.makespan.Round(time.Millisecond), thunder.holds, thunder.pauses)
 	t.Logf("prefill ratio %.2f; hit rates: baseline %.0f%%, thunder %.0f%%",
 		float64(thunder.prefilledTokens)/float64(baseline.prefilledTokens),
 		100*float64(baseline.hits)/float64(turns), 100*float64(thunder.hits)/float64(turns))

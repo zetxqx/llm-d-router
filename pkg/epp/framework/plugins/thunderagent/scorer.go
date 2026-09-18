@@ -31,11 +31,14 @@ func (a *ThunderAgent) Category() fwksched.ScorerCategory {
 	return fwksched.Balance
 }
 
-// Score is piecewise: a program bound to a candidate pod scores that pod 1.0
-// and all others 0.0 (sticky), while an unbound or displaced program scores
-// pods by free program token capacity (least-loaded placement). Anonymous
-// requests are not scored; pair this plugin with a general load scorer to
-// account for them.
+// Score is piecewise. A program the fairness policy just admitted carries a
+// reservation naming the pod that fit it; that pod scores 1.0 so the pod
+// admitted onto and the pod picked agree. Otherwise a program bound to a
+// candidate pod scores that pod 1.0 and all others 0.0 (sticky; paused
+// programs keep their origin binding), while an unbound or displaced program
+// scores pods by free decayed token capacity (least-loaded placement).
+// Anonymous requests are not scored; pair this plugin with a general load
+// scorer to account for them.
 //
 // Keeping the binding and the accounting in one table means re-placement is
 // inherent: when a scheduling filter removes the bound pod from the
@@ -50,17 +53,23 @@ func (a *ThunderAgent) Score(ctx context.Context, request *fwksched.InferenceReq
 	now := time.Now()
 	t := a.table
 	t.mu.Lock()
-	var boundPod string
+	var boundPod, reservedPod string
 	if st, ok := t.programs[id]; ok {
 		boundPod = st.podName
+	}
+	if p, ok := t.pending[id]; ok && now.Sub(p.at) <= pendingAdmissionTTL {
+		reservedPod = p.pod
 	}
 	loads := t.podLoads(now)
 	t.mu.Unlock()
 
 	scores := make(map[fwksched.Endpoint]float64, len(endpoints))
-	if boundPod != "" {
+	for _, target := range []string{reservedPod, boundPod} {
+		if target == "" {
+			continue
+		}
 		for _, endpoint := range endpoints {
-			if endpoint.GetMetadata().ID.String() == boundPod {
+			if endpoint.GetMetadata().ID.String() == target {
 				for _, e := range endpoints {
 					scores[e] = 0.0
 				}
@@ -76,10 +85,10 @@ func (a *ThunderAgent) Score(ctx context.Context, request *fwksched.InferenceReq
 		capTokens, _ := a.endpointCapacity(endpoint)
 		score := 0.0
 		if capTokens > 0 {
-			score = 1.0 - math.Min(1.0, loads[pod].tokens/capTokens)
+			score = 1.0 - math.Min(1.0, loads[pod].decayed/capTokens)
 		}
 		scores[endpoint] = score
-		logger.V(logutil.DEBUG).Info("thunderagent scoring", "endpoint", pod, "tokenLoad", loads[pod].tokens, "score", score)
+		logger.V(logutil.DEBUG).Info("thunderagent scoring", "endpoint", pod, "tokenLoad", loads[pod].decayed, "score", score)
 	}
 	return scores
 }

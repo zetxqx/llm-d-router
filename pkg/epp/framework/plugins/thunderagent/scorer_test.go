@@ -19,6 +19,7 @@ package thunderagent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,4 +87,20 @@ func TestScoreReplacesWhenBoundPodFiltered(t *testing.T) {
 	scores = a.Score(context.Background(), newRequest("program-a", 0), all)
 	assert.Equal(t, 1.0, scores[all[1]], "the program is rebound to pod2")
 	assert.Equal(t, 0.0, scores[all[0]])
+}
+
+// The pod the fairness policy fit a program onto wins over stickiness and
+// load, so the pod admitted onto and the pod picked agree.
+func TestScoreReservationWins(t *testing.T) {
+	a := newTestAgent(testConfig())
+	endpoints := newTestEndpoints("pod1", "pod2")
+
+	seedProgram(t, a, "program-a", endpoints[0], 400)
+	a.table.mu.Lock()
+	a.table.pending["program-a"] = pendingAdmission{tokens: 400, pod: endpoints[1].GetMetadata().ID.String(), at: time.Now()}
+	a.table.mu.Unlock()
+
+	scores := a.Score(context.Background(), newRequest("program-a", 0), endpoints)
+	assert.Equal(t, 1.0, scores[endpoints[1]], "the reserved pod wins")
+	assert.Equal(t, 0.0, scores[endpoints[0]], "even over the sticky binding")
 }

@@ -39,7 +39,8 @@ type thunderMetrics struct {
 	releases             *prometheus.CounterVec
 	starvationPromotions prometheus.Counter
 	rebinds              prometheus.Counter
-	sheds                prometheus.Counter
+	pauses               prometheus.Counter
+	resumes              prometheus.Counter
 	sessionFinalReleases prometheus.Counter
 	ttlEvictions         prometheus.Counter
 }
@@ -49,7 +50,7 @@ func newThunderMetrics() *thunderMetrics {
 		podUtilization: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "thunder_agent_pod_utilization",
-			Help:      metricsutil.HelpMsgWithStability("Decayed program working set as a fraction of the pod's KV token capacity.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Undecayed program working set (plus buffers) as a fraction of the pod's KV token capacity; the quantity the pause sweep enforces.", compbasemetrics.ALPHA),
 		}, []string{"pod"}),
 		podCapacityTokens: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -59,7 +60,7 @@ func newThunderMetrics() *thunderMetrics {
 		programs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "thunder_agent_programs",
-			Help:      metricsutil.HelpMsgWithStability("Tracked programs by state.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Tracked programs by state: running, idle, marked, paused.", compbasemetrics.ALPHA),
 		}, []string{"state"}),
 		holds: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -81,10 +82,15 @@ func newThunderMetrics() *thunderMetrics {
 			Name:      "thunder_agent_rebinds_total",
 			Help:      metricsutil.HelpMsgWithStability("Programs moved to a different pod by re-placement.", compbasemetrics.ALPHA),
 		}),
-		sheds: prometheus.NewCounter(prometheus.CounterOpts{
+		pauses: prometheus.NewCounter(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
-			Name:      "thunder_agent_sheds_total",
-			Help:      metricsutil.HelpMsgWithStability("Idle programs unbound from an over-ceiling pod; their next turn re-enters admission as new.", compbasemetrics.ALPHA),
+			Name:      "thunder_agent_pauses_total",
+			Help:      metricsutil.HelpMsgWithStability("Programs paused by the sweep or by a matured pause mark; their next turn must fit a pod again.", compbasemetrics.ALPHA),
+		}),
+		resumes: prometheus.NewCounter(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_resumes_total",
+			Help:      metricsutil.HelpMsgWithStability("Paused programs whose next turn was admitted and dispatched.", compbasemetrics.ALPHA),
 		}),
 		sessionFinalReleases: prometheus.NewCounter(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
@@ -112,7 +118,8 @@ func (m *thunderMetrics) register(reg prometheus.Registerer) error {
 		registerOrReuse(reg, &m.releases),
 		registerOrReuse(reg, &m.starvationPromotions),
 		registerOrReuse(reg, &m.rebinds),
-		registerOrReuse(reg, &m.sheds),
+		registerOrReuse(reg, &m.pauses),
+		registerOrReuse(reg, &m.resumes),
 		registerOrReuse(reg, &m.sessionFinalReleases),
 		registerOrReuse(reg, &m.ttlEvictions),
 	)

@@ -63,6 +63,7 @@ func TestSaturationRefreshesFitView(t *testing.T) {
 	require.NotNil(t, snap)
 	assert.Equal(t, 1000.0, snap.capacity)
 	assert.Equal(t, 450.0, snap.tokens, "350 committed plus the 100-token growth buffer")
+	assert.Equal(t, 450.0, snap.room, "900 ceiling minus the (undecayed, no half-life) working set")
 }
 
 func TestSaturationFitViewUsesRealCapacity(t *testing.T) {
@@ -86,7 +87,7 @@ func TestSaturationRequireRealCapacity(t *testing.T) {
 	a.Saturation(context.Background(), dlEndpoints("pod1"))
 
 	a.table.mu.Lock()
-	_, ok := a.fitPodLocked(100, time.Now())
+	_, ok := a.fitPodLocked(100, "", map[string]float64{})
 	a.table.mu.Unlock()
 	assert.False(t, ok, "a pod without scraped capacity has no room for new programs")
 }
@@ -136,4 +137,26 @@ func TestCapacitySourceSeriesIsExclusive(t *testing.T) {
 	assert.Equal(t, 8000.0, testutil.ToFloat64(a.metrics.podCapacityTokens.WithLabelValues(pod, string(capacityReal))))
 	assert.Equal(t, 1, testutil.CollectAndCount(a.metrics.podCapacityTokens),
 		"only the current source should have a series")
+}
+
+// The optional shared_tokens correction (upstream calculate_shared_tokens)
+// subtracts the difference between the running programs' estimate and the
+// engine's reported KV usage. It only applies with real scraped capacity and a
+// real metrics sample: a zero usage float cannot signal absence.
+func TestSaturationKVUsageCorrection(t *testing.T) {
+	run := func(t *testing.T, enabled bool, sampled bool) float64 {
+		cfg := testConfig()
+		cfg.KVUsageCorrection = enabled
+		a := newTestAgent(cfg)
+		sched := newTestEndpoints("pod1")
+		// 20000 bytes -> 5000 tokens in flight on an 8000-token pod reporting
+		// 50 percent usage (4000 tokens): shared = 5000 - 4000 = 1000.
+		inflightRequest(t, a, "runner", sched[0], 20000)
+		a.Saturation(context.Background(), []fwkdl.Endpoint{endpointWithUsage("pod1", 16, 500, 0.5, sampled)})
+		return snapshotOf(a, "default/pod1").tokens
+	}
+
+	assert.Equal(t, 4000.0, run(t, true, true), "shared tokens are subtracted from the working set")
+	assert.Equal(t, 5000.0, run(t, false, true), "knob off: estimate taken at face value")
+	assert.Equal(t, 5000.0, run(t, true, false), "no metrics sample yet: no correction")
 }

@@ -124,3 +124,24 @@ func TestParentSessionRecorded(t *testing.T) {
 	a.table.mu.Unlock()
 	assert.Equal(t, "root-42", parent)
 }
+
+// A paused program's final turn resumes it for the duration of the turn and
+// then releases it like any other final turn.
+func TestPausedProgramFinalTurnResumesAndReleases(t *testing.T) {
+	a := newTestAgent(testConfig())
+	endpoints := newTestEndpoints("pod1")
+
+	seedProgram(t, a, "program-a", endpoints[0], 800)
+	forcePause(a, "program-a")
+
+	req := newRequest("program-a", 0)
+	req.Headers = map[string]string{"x-session-final": "true"}
+	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(endpoints[0])))
+	assert.False(t, isPaused(a, "program-a"), "the final turn resumes the program")
+
+	a.ResponseBody(context.Background(), req, endOfStream(900, 800), nil)
+	a.table.mu.Lock()
+	_, tracked := a.table.programs["program-a"]
+	a.table.mu.Unlock()
+	assert.False(t, tracked)
+}

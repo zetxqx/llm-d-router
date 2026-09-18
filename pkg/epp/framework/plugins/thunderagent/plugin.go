@@ -21,11 +21,18 @@ limitations under the License.
 // one shared program table backs every hookup:
 //
 //   - Scorer: sticky placement on the bound pod, least token load otherwise.
-//   - SaturationDetector: per-pod working set against real scraped capacity,
-//     with a hysteresis latch so admission does not oscillate.
-//   - FairnessPolicy: resumes in-trajectory programs before admitting new
-//     ones, smallest footprint first, with a starvation guard.
-//   - PreRequest / ResponseBody: token accounting and session lifecycle.
+//   - SaturationDetector: per-pod working set against real scraped capacity
+//     and the periodic pause sweep; never gates.
+//   - FairnessPolicy: admits paused programs before new ones, smallest
+//     footprint first, against the decayed capacity view, with the
+//     forced-admission backstop.
+//   - PreRequest / ResponseBody: token accounting, pause/resume transitions
+//     and session lifecycle.
+//
+// The semantics follow upstream ThunderAgent's tr mode with acting-token
+// decay: an admitted program's turns dispatch unchecked; a pod over capacity
+// pauses its idle programs (undecayed view) and a paused program's next turn
+// must fit again (decayed view).
 //
 // vllm:kv_cache_usage_perc counts only the blocks held by requests the engine
 // is currently running. A program between turns (waiting on a tool) still
@@ -67,10 +74,20 @@ const (
 	estimatorMomentum = 0.8
 )
 
-// inflightEstimateKey is the per-request attribute under which PreRequest
-// stashes the token estimate it added to a program, so ResponseBody can
-// remove exactly that amount when the request completes or aborts.
-var inflightEstimateKey = fwkplugin.NewDataKey("inflight-estimate", ThunderAgentPluginType)
+// streamingUpdateEvents is how many streamed events accumulate before the
+// in-flight estimate is raised mid-turn (upstream updates every 20 tokens).
+const streamingUpdateEvents = 20
+
+// inflightState is the per-request attribute under which PreRequest stashes
+// the token estimate it added to a program, and ResponseBody the amount
+// applied so far (estimate plus streamed events), so the final call removes
+// exactly what was added.
+type inflightState struct {
+	estimate int64
+	applied  int64
+}
+
+var inflightStateKey = fwkplugin.NewDataKey("inflight-state", ThunderAgentPluginType)
 
 var (
 	_ fwksched.Scorer             = &ThunderAgent{}
@@ -92,7 +109,8 @@ type ThunderAgent struct {
 	requireRealCapacity    bool
 	utilThreshold          float64
 	bufferTokensPerProgram float64
-	shedIdle               time.Duration
+	pauseSweep             time.Duration
+	kvUsageCorrection      bool
 	headWaitStarvationMs   float64
 	sessionFinalHeader     string
 	parentSessionHeader    string
@@ -134,7 +152,8 @@ func newThunderAgent(name string, cfg Config) *ThunderAgent {
 		requireRealCapacity:    cfg.RequireRealCapacity,
 		utilThreshold:          cfg.UtilThreshold,
 		bufferTokensPerProgram: float64(cfg.BufferTokensPerProgram),
-		shedIdle:               time.Duration(cfg.ShedIdleSeconds * float64(time.Second)),
+		pauseSweep:             time.Duration(cfg.PauseSweepSeconds * float64(time.Second)),
+		kvUsageCorrection:      cfg.KVUsageCorrection,
 		headWaitStarvationMs:   cfg.HeadWaitStarvationMs,
 		sessionFinalHeader:     strings.ToLower(strings.TrimSpace(cfg.SessionFinalHeader)),
 		parentSessionHeader:    strings.ToLower(strings.TrimSpace(cfg.ParentSessionHeader)),
