@@ -39,6 +39,7 @@ type dumpState struct {
 	BytesPerToken        float64            `json:"bytesPerToken"`
 	PausesTotal          int64              `json:"pausesTotal"`
 	ResumesTotal         int64              `json:"resumesTotal"`
+	OriginWaitsTotal     int64              `json:"originWaitsTotal"`
 	Pods                 map[string]podDump `json:"pods"`
 }
 
@@ -47,10 +48,11 @@ func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
 	t := a.table
 	t.mu.Lock()
 	state := dumpState{
-		BytesPerToken: t.bytesPerToken,
-		PausesTotal:   t.pausesTotal,
-		ResumesTotal:  t.resumesTotal,
-		Pods:          make(map[string]podDump),
+		BytesPerToken:    t.bytesPerToken,
+		PausesTotal:      t.pausesTotal,
+		ResumesTotal:     t.resumesTotal,
+		OriginWaitsTotal: t.originWaitsTotal,
+		Pods:             make(map[string]podDump),
 	}
 	for _, st := range t.programs {
 		state.TotalPrograms++

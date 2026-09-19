@@ -220,6 +220,134 @@ func TestPausedFallsBackToMostRoomWhenOriginIsFull(t *testing.T) {
 	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.rebinds), "resuming elsewhere is a rebind")
 }
 
+func originOnlyConfig() Config {
+	cfg := testConfig()
+	cfg.ResumePlacement = ResumePlacementOriginOnly
+	return cfg
+}
+
+// Under origin-only a paused program whose origin pod is full is held even
+// though another pod has room; it resumes onto the origin once that has room,
+// with no rebind, and the delay is counted as an origin wait.
+func TestOriginOnlyHoldsForTheOriginPod(t *testing.T) {
+	a := newTestAgent(originOnlyConfig())
+	sched := newTestEndpoints("pod1", "pod2")
+
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700) // pod1 room 200 once veteran is paused
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2") // pod2 room 900
+
+	q := makeQueueWithBytes("veteran", 1, time.Now(), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	assert.Nil(t, picked, "held: the origin pod has no room and the policy does not move the program")
+	_, reserved := reservationOf(a, "veteran")
+	assert.False(t, reserved)
+	assert.True(t, isOriginHeld(a, "veteran"), "pod2 would have taken it, so the hold is the policy's")
+
+	// The runner shrinks; pod1 now has room 600.
+	seedProgram(t, a, "runner", sched[0], 300)
+	primeFitView(a, "pod1", "pod2")
+	picked, err = a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	require.Same(t, q, picked)
+	res, ok := reservationOf(a, "veteran")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod1", res.pod)
+
+	req := newRequest("veteran", 300*4)
+	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(sched[0])))
+	assert.False(t, isPaused(a, "veteran"))
+	assert.False(t, isOriginHeld(a, "veteran"))
+	assert.Equal(t, 0.0, testutil.ToFloat64(a.metrics.rebinds))
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.originWaits))
+	raw, err := a.DumpState()
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"originWaitsTotal":1`)
+}
+
+// A hold that is not the policy's doing (no pod has room) is not an origin wait.
+func TestOriginOnlyDoesNotCountHoldsWhenNoPodHasRoom(t *testing.T) {
+	a := newTestAgent(originOnlyConfig())
+	sched := newTestEndpoints("pod1", "pod2")
+
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700)
+	seedProgram(t, a, "other", sched[1], 800) // pod2 room 100
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2")
+
+	q := makeQueueWithBytes("veteran", 1, time.Now(), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	assert.Nil(t, picked)
+	assert.False(t, isOriginHeld(a, "veteran"))
+}
+
+// When the origin pod has left the fit view, origin-only places by room like
+// most-room does.
+func TestOriginOnlyFallsBackWhenOriginLeftThePool(t *testing.T) {
+	a := newTestAgent(originOnlyConfig())
+	sched := newTestEndpoints("pod1", "pod2")
+
+	seedProgram(t, a, "veteran", sched[0], 300)
+	forcePause(a, "veteran")
+	primeFitView(a, "pod2") // pod1 never reported: gone
+
+	q := makeQueueWithBytes("veteran", 1, time.Now(), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	require.Same(t, q, picked)
+	res, ok := reservationOf(a, "veteran")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod2", res.pod)
+	assert.False(t, isOriginHeld(a, "veteran"))
+}
+
+// The forced-admission backstop still fires under origin-only; the scorer's
+// sticky branch then sends the program to its origin regardless of room.
+func TestOriginOnlyForcedAdmissionGoesToOrigin(t *testing.T) {
+	cfg := originOnlyConfig()
+	cfg.HeadWaitStarvationMs = 500
+	a := newTestAgent(cfg)
+	sched := newTestEndpoints("pod1", "pod2")
+
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700)
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2")
+
+	q := makeQueueWithBytes("veteran", 1, time.Now().Add(-time.Second), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	require.Same(t, q, picked)
+	_, reserved := reservationOf(a, "veteran")
+	assert.False(t, reserved, "a forced admission carries no reservation")
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.starvationPromotions))
+
+	scores := a.Score(context.Background(), newRequest("veteran", 300*4), sched)
+	assert.Equal(t, 1.0, scores[sched[0]], "sticky to the origin")
+	assert.Equal(t, 0.0, scores[sched[1]])
+}
+
+// New programs are placed by room under either policy.
+func TestOriginOnlyLeavesNewProgramsUnaffected(t *testing.T) {
+	a := newTestAgent(originOnlyConfig())
+	sched := newTestEndpoints("pod1", "pod2")
+
+	seedProgram(t, a, "runner", sched[0], 800) // pod1 room 100, pod2 room 900
+	primeFitView(a, "pod1", "pod2")
+
+	q := makeQueueWithBytes("rookie", 1, time.Now(), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	require.Same(t, q, picked)
+	res, ok := reservationOf(a, "rookie")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod2", res.pod)
+}
+
 // A paused program outranks a never-admitted one when both fit, regardless of
 // size and enqueue order (upstream's REASONING group precedes NEW).
 func TestPick_PausedBeatsNewcomer(t *testing.T) {

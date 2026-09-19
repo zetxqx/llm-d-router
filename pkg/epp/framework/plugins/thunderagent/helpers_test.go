@@ -63,6 +63,13 @@ func isMarked(a *ThunderAgent, id string) bool {
 
 // forcePause puts a program into the paused state directly, as the sweep
 // would, keeping its binding as the origin pod.
+func isOriginHeld(a *ThunderAgent, id string) bool {
+	a.table.mu.Lock()
+	defer a.table.mu.Unlock()
+	st, ok := a.table.programs[id]
+	return ok && st.originHeld
+}
+
 func forcePause(a *ThunderAgent, id string) {
 	a.table.mu.Lock()
 	a.table.programs[id].paused = true

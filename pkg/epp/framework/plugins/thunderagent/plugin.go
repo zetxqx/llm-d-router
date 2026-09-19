@@ -111,6 +111,7 @@ type ThunderAgent struct {
 	bufferTokensPerProgram float64
 	pauseSweep             time.Duration
 	kvUsageCorrection      bool
+	resumeOriginOnly       bool
 	headWaitStarvationMs   float64
 	sessionFinalHeader     string
 	parentSessionHeader    string
@@ -154,6 +155,7 @@ func newThunderAgent(name string, cfg Config) *ThunderAgent {
 		bufferTokensPerProgram: float64(cfg.BufferTokensPerProgram),
 		pauseSweep:             time.Duration(cfg.PauseSweepSeconds * float64(time.Second)),
 		kvUsageCorrection:      cfg.KVUsageCorrection,
+		resumeOriginOnly:       cfg.ResumePlacement == ResumePlacementOriginOnly,
 		headWaitStarvationMs:   cfg.HeadWaitStarvationMs,
 		sessionFinalHeader:     strings.ToLower(strings.TrimSpace(cfg.SessionFinalHeader)),
 		parentSessionHeader:    strings.ToLower(strings.TrimSpace(cfg.ParentSessionHeader)),

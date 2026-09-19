@@ -73,7 +73,8 @@ const holdWaitFloor = time.Second
 // growth buffer, within utilThreshold of the pod's capacity. A paused program
 // is sized at the larger of its committed tokens and the new turn's estimate
 // (upstream re-estimates before the program waits) and prefers its origin
-// pod when that fits. A fitting program gets a reservation charged to the pod
+// pod when that fits; with resumePlacement origin-only it waits for the
+// origin instead of moving. A fitting program gets a reservation charged to the pod
 // that fit it, released when PreRequest binds the program. A head waiting
 // past headWaitStarvationMs dispatches regardless of class, size, or fit,
 // oldest first: the forced-admission backstop.
@@ -138,9 +139,18 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 			if class == classPaused {
 				preferred = t.programs[id].podName
 			}
-			pod, ok := a.fitPodLocked(tokens+a.bufferTokensPerProgram, preferred, pendingByPod)
+			required := tokens + a.bufferTokensPerProgram
+			pod, ok := a.fitPodLocked(required, preferred, pendingByPod)
 			if !ok && !starving {
 				held++
+				if a.resumeOriginOnly && preferred != "" {
+					// The hold is the policy's doing only if another pod
+					// would have taken the program; record it for the
+					// origin-waits counter at resume time.
+					if _, elsewhere := a.mostRoomLocked(required, pendingByPod); elsewhere {
+						t.programs[id].originHeld = true
+					}
+				}
 				return true
 			}
 			fitPod = pod
@@ -215,10 +225,13 @@ func (t *programTable) pendingByPod(now time.Time) map[string]float64 {
 // fitPodLocked returns the pod to admit a program of the required size onto,
 // if any. Room is the decayed admission room from the fit view minus live
 // reservations. The preferred pod (a paused program's origin, where its
-// prefix is warm) wins whenever it fits; otherwise the pod with the most room
-// is chosen. With no fit view the check fails open: the plugin is then not
-// wired as the saturation detector and only class ordering applies. Callers
-// must hold t.mu.
+// prefix is warm) wins whenever it fits. When it does not, the pod with the
+// most room is chosen, unless resumePlacement is origin-only and the
+// preferred pod is still in the fit view: then the program waits for it. A
+// preferred pod missing from the fit view (left the pool, or stale) is
+// placed by room under either policy. With no fit view the check fails open:
+// the plugin is then not wired as the saturation detector and only class
+// ordering applies. Callers must hold t.mu.
 func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingByPod map[string]float64) (string, bool) {
 	t := a.table
 	if len(t.snapshot) == 0 {
@@ -228,10 +241,19 @@ func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingB
 		if snap.room-pendingByPod[preferred] >= required {
 			return preferred, true
 		}
+		if a.resumeOriginOnly {
+			return "", false
+		}
 	}
+	return a.mostRoomLocked(required, pendingByPod)
+}
+
+// mostRoomLocked returns the pod with the most room net of reservations that
+// covers the required size, if any. Callers must hold t.mu.
+func (a *ThunderAgent) mostRoomLocked(required float64, pendingByPod map[string]float64) (string, bool) {
 	bestPod := ""
 	bestRoom := 0.0
-	for pod, snap := range t.snapshot {
+	for pod, snap := range a.table.snapshot {
 		room := snap.room - pendingByPod[pod]
 		if room >= required && room > bestRoom {
 			bestPod, bestRoom = pod, room

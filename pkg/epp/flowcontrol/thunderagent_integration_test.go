@@ -398,6 +398,44 @@ func TestThunderAgentForcedAdmissionOfPausedProgram(t *testing.T) {
 		"dispatch came from the forced-admission backstop, not from a fit")
 }
 
+// Under resumePlacement origin-only the paused program waits for its origin
+// pod; on a one-pod pool that is the same hold as most-room, ended here by
+// the forced-admission backstop. Proves the strict decoder accepts the knob
+// and the origin-only branch runs inside the real dispatch loop.
+func TestThunderAgentOriginOnlyForcedAdmissionOfPausedProgram(t *testing.T) {
+	t.Parallel()
+	ta := newThunderForIntegration(t, thunderPauseParamsOriginOnly)
+	h := newHarness(t, harnessOpts{
+		detector:           ta,
+		fairness:           ta,
+		endpointCandidates: thunderCandidates(),
+	})
+
+	runTurn(t, ta, "veteran", 400)
+	runTurn(t, ta, "runner", 900)
+	require.Eventually(t, func() bool { return pausesTotal(t, ta) >= 1 }, 5*time.Second, time.Millisecond)
+
+	started := time.Now()
+	done := enqueueTurn(h, "veteran")
+	requireHeld(t, done, 150*time.Millisecond)
+	requireDispatched(t, done, 5*time.Second)
+	assert.GreaterOrEqual(t, time.Since(started), 300*time.Millisecond)
+	assert.Equal(t, 0, dumpField(t, ta, "originWaitsTotal"), "no other pod had room, so the hold was not the policy's")
+}
+
+const thunderPauseParamsOriginOnly = `{
+	"capacityTokens": 1000,
+	"utilThreshold": 0.9,
+	"actingHalfLifeSeconds": 0,
+	"bufferTokensPerProgram": 0,
+	"headWaitStarvationMs": 300,
+	"evictionTtlSeconds": 3600,
+	"evictionSweepSeconds": 300,
+	"sessionFinalHeader": "x-session-final",
+	"pauseSweepSeconds": 0,
+	"resumePlacement": "origin-only"
+}`
+
 // Same pod and ceiling as thunderPauseParams, with a 300 ms forced-admission
 // backstop.
 const thunderPauseParamsStarve = `{

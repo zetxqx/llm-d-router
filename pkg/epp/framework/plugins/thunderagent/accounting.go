@@ -62,7 +62,12 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 	// still pauses once all its turns drain (upstream pauses on the first
 	// completed response).
 	resumed := st.paused
+	originWaited := st.originHeld
 	st.paused = false
+	st.originHeld = false
+	if originWaited {
+		t.originWaitsTotal++
+	}
 	st.podName = podName
 	st.inflightTokens += estimate
 	st.dispatchCount++
@@ -82,6 +87,9 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 	if resumed {
 		a.metrics.resumes.Inc()
 		log.FromContext(ctx).V(logutil.DEBUG).Info("thunderagent.resume", "pod", podName)
+	}
+	if originWaited {
+		a.metrics.originWaits.Inc()
 	}
 	request.PutAttribute(inflightStateKey, inflightState{estimate: estimate, applied: estimate})
 	return nil

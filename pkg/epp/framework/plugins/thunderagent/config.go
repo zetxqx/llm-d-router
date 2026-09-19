@@ -22,6 +22,18 @@ import (
 	"strings"
 )
 
+// ResumePlacement values: where a paused program's next turn may be placed.
+const (
+	// ResumePlacementMostRoom resumes onto the origin pod when it fits, else
+	// onto the pod with the most room (upstream's best-fit-decreasing
+	// re-placement, which can move the program off its warm prefix cache).
+	ResumePlacementMostRoom = "most-room"
+	// ResumePlacementOriginOnly holds the turn until the origin pod has room.
+	// The program moves only when the origin has left the pool or the
+	// forced-admission backstop fires.
+	ResumePlacementOriginOnly = "origin-only"
+)
+
 // Config holds the configuration for the ThunderAgent plugin.
 type Config struct {
 	// CapacityTokens is the per-endpoint KV cache capacity in tokens used when
@@ -58,6 +70,12 @@ type Config struct {
 	// usage (upstream shared_tokens). Upstream never activates this path, so
 	// it is off by default; it needs real scraped capacity and metrics.
 	KVUsageCorrection bool `json:"kvUsageCorrection"`
+	// ResumePlacement decides where a paused program's next turn may go:
+	// "most-room" (default) prefers the origin pod and falls back to the pod
+	// with the most room; "origin-only" holds the turn until the origin pod
+	// has room, unless the origin left the pool or HeadWaitStarvationMs
+	// fires. New programs always go to the pod with the most room.
+	ResumePlacement string `json:"resumePlacement"`
 	// HeadWaitStarvationMs promotes any queue whose head has waited at least
 	// this long ahead of class, size and fit. This is the forced-admission
 	// backstop (upstream _wait_for_resume timeout, 1800 s). 0 disables it.
@@ -86,6 +104,7 @@ func defaultConfig() Config {
 		ActingHalfLifeSeconds:  1,
 		BufferTokensPerProgram: 100,
 		PauseSweepSeconds:      5,
+		ResumePlacement:        ResumePlacementMostRoom,
 		HeadWaitStarvationMs:   1800000,
 		EvictionTTLSeconds:     3600,
 		EvictionSweepSeconds:   300,
@@ -109,6 +128,9 @@ func (c Config) validate() error {
 	}
 	if c.PauseSweepSeconds < 0 {
 		return fmt.Errorf("pauseSweepSeconds must be >= 0, got %v", c.PauseSweepSeconds)
+	}
+	if c.ResumePlacement != ResumePlacementMostRoom && c.ResumePlacement != ResumePlacementOriginOnly {
+		return fmt.Errorf("resumePlacement must be %q or %q, got %q", ResumePlacementMostRoom, ResumePlacementOriginOnly, c.ResumePlacement)
 	}
 	if c.HeadWaitStarvationMs < 0 {
 		return fmt.Errorf("headWaitStarvationMs must be >= 0, got %v", c.HeadWaitStarvationMs)

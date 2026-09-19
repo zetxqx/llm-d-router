@@ -44,6 +44,14 @@ func TestFactory(t *testing.T) {
 		assert.False(t, a.kvUsageCorrection)
 		assert.Equal(t, 100.0, a.bufferTokensPerProgram)
 		assert.Equal(t, "x-session-final", a.sessionFinalHeader)
+		assert.False(t, a.resumeOriginOnly, "default resume placement is most-room")
+	})
+
+	t.Run("origin-only resume placement", func(t *testing.T) {
+		params := json.NewDecoder(bytes.NewBufferString(`{"resumePlacement": "origin-only"}`))
+		p, err := Factory("test", params, nil)
+		require.NoError(t, err)
+		assert.True(t, p.(*ThunderAgent).resumeOriginOnly)
 	})
 
 	t.Run("header names are normalized", func(t *testing.T) {
@@ -64,6 +72,7 @@ func TestFactory(t *testing.T) {
 		"pause sweep":    `{"pauseSweepSeconds": -1}`,
 		"ttl below hold": `{"evictionTtlSeconds": 60}`, // a held program would be evicted mid-wait
 		"final header":   `{"sessionFinalHeader": " "}`,
+		"placement":      `{"resumePlacement": "nearest"}`,
 	}
 	for name, raw := range invalid {
 		t.Run("invalid "+name, func(t *testing.T) {

@@ -49,6 +49,10 @@ type program struct {
 	// markedForPause is set by the sweep on a program with a request in
 	// flight; it becomes paused when that turn's response completes.
 	markedForPause bool
+	// originHeld records that the origin-only resume policy held this paused
+	// program's turn while another pod had room. Counted as an origin wait
+	// when the program resumes.
+	originHeld bool
 	// finalSeen records that the session-final header was observed; the
 	// program is released when that turn's response completes.
 	finalSeen bool
@@ -127,6 +131,8 @@ type programTable struct {
 	// state dump.
 	pausesTotal  int64
 	resumesTotal int64
+	// originWaitsTotal counts resumes that the origin-only policy delayed.
+	originWaitsTotal int64
 }
 
 func newProgramTable(cfg Config) *programTable {

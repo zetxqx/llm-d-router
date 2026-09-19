@@ -31,7 +31,7 @@ The flow controller's saturation gate is a band-level head-of-line block: while 
 **Gate** (upstream `_greedy_resume` plus the unchecked path for active programs), in the fairness policy where an admitted program's turn can be told apart from a paused or new program's turn:
 
 - A REASONING program (bound, not paused, dispatched at least once) always dispatches: smallest footprint first, oldest head as the tiebreaker.
-- A PAUSED program's next turn is fit-checked with the larger of its committed tokens and the new turn's estimate (upstream re-estimates from the request body before the program waits), plus the buffer, against the decayed room of a pod. It prefers its origin pod when that fits, otherwise the pod with the most room. Paused programs outrank new ones (upstream's REASONING group precedes NEW), smallest first; a paused program that fits nowhere never blocks a fitting newcomer (upstream skips non-fitting candidates too).
+- A PAUSED program's next turn is fit-checked with the larger of its committed tokens and the new turn's estimate (upstream re-estimates from the request body before the program waits), plus the buffer, against the decayed room of a pod. It prefers its origin pod when that fits, otherwise the pod with the most room (`resumePlacement: most-room`, the default). With `resumePlacement: origin-only` it waits for its origin pod instead of moving, unless the origin has left the fit view (then it is placed by room) or the forced-admission backstop fires (then the scorer's sticky branch sends it to the origin regardless of room); the resumes that this policy delayed while another pod had room are counted in `thunder_agent_origin_waits_total`. Paused programs outrank new ones (upstream's REASONING group precedes NEW), smallest first; a paused program that fits nowhere never blocks a fitting newcomer (upstream skips non-fitting candidates too).
 - A NEW program dispatches only when a pod has decayed room for `request bytes / bytes-per-token + bufferTokensPerProgram`, counting live admission reservations.
 - An admitted paused or new program reserves that room on the pod that fit it until `PreRequest` binds it, and the scorer routes it to that pod, so back-to-back dispatch cycles cannot over-admit and the pod admitted onto is the pod picked.
 - Any head waiting past `headWaitStarvationMs` dispatches regardless of class, size, or fit, oldest first: the forced-admission backstop (upstream `_wait_for_resume`, 1800 s).
@@ -55,6 +55,7 @@ A request carrying the session-final header (`x-session-final: true` by default)
     actingHalfLifeSeconds: 1
     bufferTokensPerProgram: 100
     pauseSweepSeconds: 5
+    resumePlacement: most-room
     headWaitStarvationMs: 1800000
     evictionTtlSeconds: 3600
     evictionSweepSeconds: 300
@@ -70,6 +71,7 @@ A request carrying the session-final header (`x-session-final: true` by default)
 | `bufferTokensPerProgram` | `100` | `BUFFER_PER_PROGRAM = 100` | Reserved per program in both views and in the admission fit check. |
 | `pauseSweepSeconds` | `5` | `scheduler_interval = 5` | Interval of the per-pod pause sweep. `0` sweeps on every dispatch cycle. |
 | `kvUsageCorrection` | `false` | `shared_tokens` (never activated upstream) | Subtract, per pod, the running programs' estimate minus the engine's reported KV usage. Needs real scraped capacity and metrics. |
+| `resumePlacement` | `most-room` | BFD re-placement (`most-room`) | Where a paused program's next turn may go. `most-room`: origin pod if it fits, else the pod with the most room. `origin-only`: wait for the origin pod; move only when it left the pool or the backstop fires. New programs always go to the pod with the most room. |
 | `headWaitStarvationMs` | `1800000` | `_wait_for_resume` timeout 1800 s | Forced admission of any head waiting this long. `0` disables it. `30000` is the improved variant. |
 | `evictionTtlSeconds` | `3600` | none (upstream leaks unreleased programs) | A program with no in-flight request and no activity in this window is dropped. Must exceed `headWaitStarvationMs`. |
 | `evictionSweepSeconds` | `300` | - | How often the eviction sweep runs. |
@@ -81,7 +83,7 @@ See `deploy/config/thunderagent-config.yaml` for the full pipeline, including `f
 
 ## Deviations from upstream ThunderAgent
 
-- **Resume placement.** Upstream re-places a resumed program on the backend with the most free capacity (best-fit-decreasing), which can move it off its warm prefix cache. Here a paused program resumes onto its origin pod whenever that fits, otherwise onto the pod with the most room.
+- **Resume placement.** Upstream re-places a resumed program on the backend with the most free capacity (best-fit-decreasing), which can move it off its warm prefix cache. Here a paused program resumes onto its origin pod whenever that fits, otherwise onto the pod with the most room; `resumePlacement: origin-only` goes further and waits for the origin pod, which upstream never does.
 - **Event-driven admission.** Upstream admits paused and new programs on its 5 s tick, and a new program is admitted directly against the undecayed view only when nothing waits. Here admission is re-evaluated on every dispatch cycle against the decayed view, so a hold ends as soon as room exists and admission is per pod rather than a pool-wide cumulative selection.
 - **Overlapping turns.** A pause mark matures when the program has no turn in flight; upstream pauses on the first completed response.
 - **Forced admission and TTL knobs.** `headWaitStarvationMs` below 1800 s and `pauseSweepSeconds: 0` are improvements available for an A/B, not upstream behavior. Flow control's request TTL can reject held requests with 429 if set; the shipped config disables it.
