@@ -45,6 +45,14 @@ func TestFactory(t *testing.T) {
 		assert.Equal(t, 100.0, a.bufferTokensPerProgram)
 		assert.Equal(t, "x-session-final", a.sessionFinalHeader)
 		assert.False(t, a.resumeOriginOnly, "default resume placement is most-room")
+		assert.Equal(t, 0.0, a.urgentWaitMs, "urgent tier off by default")
+	})
+
+	t.Run("urgent tier", func(t *testing.T) {
+		params := json.NewDecoder(bytes.NewBufferString(`{"urgentWaitMs": 15000}`))
+		p, err := Factory("test", params, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 15000.0, p.(*ThunderAgent).urgentWaitMs)
 	})
 
 	t.Run("origin-only resume placement", func(t *testing.T) {
@@ -73,6 +81,8 @@ func TestFactory(t *testing.T) {
 		"ttl below hold": `{"evictionTtlSeconds": 60}`, // a held program would be evicted mid-wait
 		"final header":   `{"sessionFinalHeader": " "}`,
 		"placement":      `{"resumePlacement": "nearest"}`,
+		"urgent":         `{"urgentWaitMs": -1}`,
+		"urgent above":   `{"urgentWaitMs": 1800000}`, // not below headWaitStarvationMs: the tier would never apply
 	}
 	for name, raw := range invalid {
 		t.Run("invalid "+name, func(t *testing.T) {

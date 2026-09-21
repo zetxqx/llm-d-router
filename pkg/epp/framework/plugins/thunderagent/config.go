@@ -76,6 +76,14 @@ type Config struct {
 	// has room, unless the origin left the pool or HeadWaitStarvationMs
 	// fires. New programs always go to the pod with the most room.
 	ResumePlacement string `json:"resumePlacement"`
+	// UrgentWaitMs is the urgent tier: a paused or new program whose head has
+	// waited at least this long is ordered ahead of every non-urgent paused or
+	// new program (oldest first) and, under origin-only placement, may take
+	// any pod with room instead of waiting for its origin. It still needs a
+	// pod with room (unlike HeadWaitStarvationMs). Set it to the TTFT SLO
+	// minus the cost of one re-prefill. 0 disables the tier. Not upstream
+	// behaviour (proposal Part 1 aging plus Part 3 Option B).
+	UrgentWaitMs float64 `json:"urgentWaitMs"`
 	// HeadWaitStarvationMs promotes any queue whose head has waited at least
 	// this long ahead of class, size and fit. This is the forced-admission
 	// backstop (upstream _wait_for_resume timeout, 1800 s). 0 disables it.
@@ -131,6 +139,12 @@ func (c Config) validate() error {
 	}
 	if c.ResumePlacement != ResumePlacementMostRoom && c.ResumePlacement != ResumePlacementOriginOnly {
 		return fmt.Errorf("resumePlacement must be %q or %q, got %q", ResumePlacementMostRoom, ResumePlacementOriginOnly, c.ResumePlacement)
+	}
+	if c.UrgentWaitMs < 0 {
+		return fmt.Errorf("urgentWaitMs must be >= 0, got %v", c.UrgentWaitMs)
+	}
+	if c.UrgentWaitMs > 0 && c.HeadWaitStarvationMs > 0 && c.UrgentWaitMs >= c.HeadWaitStarvationMs {
+		return fmt.Errorf("urgentWaitMs (%v) must be below headWaitStarvationMs (%v), or the urgent tier never applies", c.UrgentWaitMs, c.HeadWaitStarvationMs)
 	}
 	if c.HeadWaitStarvationMs < 0 {
 		return fmt.Errorf("headWaitStarvationMs must be >= 0, got %v", c.HeadWaitStarvationMs)

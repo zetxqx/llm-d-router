@@ -75,9 +75,12 @@ const holdWaitFloor = time.Second
 // (upstream re-estimates before the program waits) and prefers its origin
 // pod when that fits; with resumePlacement origin-only it waits for the
 // origin instead of moving. A fitting program gets a reservation charged to the pod
-// that fit it, released when PreRequest binds the program. A head waiting
-// past headWaitStarvationMs dispatches regardless of class, size, or fit,
-// oldest first: the forced-admission backstop.
+// that fit it, released when PreRequest binds the program. A paused or new
+// head waiting past urgentWaitMs is urgent: it outranks every non-urgent
+// paused or new program (oldest first) and may take any pod with room even
+// under origin-only, but it still needs room. A head waiting past
+// headWaitStarvationMs dispatches regardless of class, size, or fit, oldest
+// first: the forced-admission backstop.
 //
 // Returning nil while only non-fitting paused or new programs wait is the
 // hold: the processor dispatches nothing and retries next cycle.
@@ -103,6 +106,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		tokens   float64
 		waitMs   float64
 		starving bool
+		urgent   bool
 		fitPod   string
 	}
 
@@ -126,6 +130,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		waitMs := float64(now.Sub(head.EnqueueTime()).Milliseconds())
 		class, tokens := t.classAndTokens(id)
 		starving := a.headWaitStarvationMs > 0 && waitMs >= a.headWaitStarvationMs
+		urgent := class != classReasoning && !starving && a.urgentWaitMs > 0 && waitMs >= a.urgentWaitMs
 
 		fitPod := ""
 		if class != classReasoning {
@@ -140,10 +145,11 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 				preferred = t.programs[id].podName
 			}
 			required := tokens + a.bufferTokensPerProgram
-			pod, ok := a.fitPodLocked(required, preferred, pendingByPod)
+			// An urgent program is released from the origin-only restriction.
+			pod, ok := a.fitPodLocked(required, preferred, pendingByPod, a.resumeOriginOnly && !urgent)
 			if !ok && !starving {
 				held++
-				if a.resumeOriginOnly && preferred != "" {
+				if a.resumeOriginOnly && !urgent && preferred != "" {
 					// The hold is the policy's doing only if another pod
 					// would have taken the program; record it for the
 					// origin-waits counter at resume time.
@@ -156,9 +162,9 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 			fitPod = pod
 		}
 
-		c := &candidate{queue: queue, class: class, tokens: tokens, waitMs: waitMs, starving: starving, fitPod: fitPod}
-		if best == nil || betterThan(c.class, c.tokens, c.waitMs, c.starving,
-			best.class, best.tokens, best.waitMs, best.starving) {
+		c := &candidate{queue: queue, class: class, tokens: tokens, waitMs: waitMs, starving: starving, urgent: urgent, fitPod: fitPod}
+		if best == nil || betterThan(c.class, c.tokens, c.waitMs, c.starving, c.urgent,
+			best.class, best.tokens, best.waitMs, best.starving, best.urgent) {
 			best = c
 		}
 		return true
@@ -169,6 +175,9 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		t.pending[best.queue.FlowKey().ID] = pendingAdmission{
 			tokens: best.tokens + a.bufferTokensPerProgram, pod: best.fitPod, at: now,
 		}
+	}
+	if best != nil && best.urgent {
+		t.urgentPromotionsTotal++
 	}
 	t.mu.Unlock()
 
@@ -187,9 +196,12 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	if best.starving {
 		a.metrics.starvationPromotions.Inc()
 	}
-	if wasHeld || best.starving {
+	if best.urgent {
+		a.metrics.urgentPromotions.Inc()
+	}
+	if wasHeld || best.starving || best.urgent {
 		logger.V(logutil.DEBUG).Info("thunderagent.release",
-			"class", best.class.String(), "waited_ms", best.waitMs, "starved", best.starving)
+			"class", best.class.String(), "waited_ms", best.waitMs, "starved", best.starving, "urgent", best.urgent)
 	}
 	return best.queue, nil
 }
@@ -226,13 +238,13 @@ func (t *programTable) pendingByPod(now time.Time) map[string]float64 {
 // if any. Room is the decayed admission room from the fit view minus live
 // reservations. The preferred pod (a paused program's origin, where its
 // prefix is warm) wins whenever it fits. When it does not, the pod with the
-// most room is chosen, unless resumePlacement is origin-only and the
-// preferred pod is still in the fit view: then the program waits for it. A
-// preferred pod missing from the fit view (left the pool, or stale) is
-// placed by room under either policy. With no fit view the check fails open:
-// the plugin is then not wired as the saturation detector and only class
-// ordering applies. Callers must hold t.mu.
-func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingByPod map[string]float64) (string, bool) {
+// most room is chosen, unless waitForOrigin is set (origin-only placement and
+// the program is not urgent) and the preferred pod is still in the fit view:
+// then the program waits for it. A preferred pod missing from the fit view
+// (left the pool, or stale) is placed by room under either policy. With no
+// fit view the check fails open: the plugin is then not wired as the
+// saturation detector and only class ordering applies. Callers must hold t.mu.
+func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingByPod map[string]float64, waitForOrigin bool) (string, bool) {
 	t := a.table
 	if len(t.snapshot) == 0 {
 		return "", true
@@ -241,7 +253,7 @@ func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingB
 		if snap.room-pendingByPod[preferred] >= required {
 			return preferred, true
 		}
-		if a.resumeOriginOnly {
+		if waitForOrigin {
 			return "", false
 		}
 	}
@@ -262,13 +274,21 @@ func (a *ThunderAgent) mostRoomLocked(required float64, pendingByPod map[string]
 	return bestPod, bestPod != ""
 }
 
-// betterThan reports whether candidate a outranks the incumbent b.
-func betterThan(aClass programClass, aTokens, aWait float64, aStarving bool,
-	bClass programClass, bTokens, bWait float64, bStarving bool) bool {
+// betterThan reports whether candidate a outranks the incumbent b: starving
+// first (oldest first), then urgent (oldest first), then class, then the
+// smaller footprint, then the older head.
+func betterThan(aClass programClass, aTokens, aWait float64, aStarving, aUrgent bool,
+	bClass programClass, bTokens, bWait float64, bStarving, bUrgent bool) bool {
 	if aStarving != bStarving {
 		return aStarving
 	}
 	if aStarving && bStarving {
+		return aWait > bWait
+	}
+	if aUrgent != bUrgent {
+		return aUrgent
+	}
+	if aUrgent && bUrgent {
 		return aWait > bWait
 	}
 	if aClass != bClass {

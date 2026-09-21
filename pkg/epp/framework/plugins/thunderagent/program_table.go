@@ -133,6 +133,8 @@ type programTable struct {
 	resumesTotal int64
 	// originWaitsTotal counts resumes that the origin-only policy delayed.
 	originWaitsTotal int64
+	// urgentPromotionsTotal counts dispatches made from the urgent tier.
+	urgentPromotionsTotal int64
 }
 
 func newProgramTable(cfg Config) *programTable {

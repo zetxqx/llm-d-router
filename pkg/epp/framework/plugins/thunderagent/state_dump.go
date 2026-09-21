@@ -32,15 +32,16 @@ type podDump struct {
 // from a user-controlled request header, so they are omitted; only bounded
 // aggregates are reported.
 type dumpState struct {
-	TotalPrograms        int                `json:"totalPrograms"`
-	TotalInflightTokens  int64              `json:"totalInflightTokens"`
-	TotalCommittedTokens int64              `json:"totalCommittedTokens"`
-	PausedPrograms       int                `json:"pausedPrograms"`
-	BytesPerToken        float64            `json:"bytesPerToken"`
-	PausesTotal          int64              `json:"pausesTotal"`
-	ResumesTotal         int64              `json:"resumesTotal"`
-	OriginWaitsTotal     int64              `json:"originWaitsTotal"`
-	Pods                 map[string]podDump `json:"pods"`
+	TotalPrograms         int                `json:"totalPrograms"`
+	TotalInflightTokens   int64              `json:"totalInflightTokens"`
+	TotalCommittedTokens  int64              `json:"totalCommittedTokens"`
+	PausedPrograms        int                `json:"pausedPrograms"`
+	BytesPerToken         float64            `json:"bytesPerToken"`
+	PausesTotal           int64              `json:"pausesTotal"`
+	ResumesTotal          int64              `json:"resumesTotal"`
+	OriginWaitsTotal      int64              `json:"originWaitsTotal"`
+	UrgentPromotionsTotal int64              `json:"urgentPromotionsTotal"`
+	Pods                  map[string]podDump `json:"pods"`
 }
 
 func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
@@ -48,11 +49,12 @@ func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
 	t := a.table
 	t.mu.Lock()
 	state := dumpState{
-		BytesPerToken:    t.bytesPerToken,
-		PausesTotal:      t.pausesTotal,
-		ResumesTotal:     t.resumesTotal,
-		OriginWaitsTotal: t.originWaitsTotal,
-		Pods:             make(map[string]podDump),
+		BytesPerToken:         t.bytesPerToken,
+		PausesTotal:           t.pausesTotal,
+		ResumesTotal:          t.resumesTotal,
+		OriginWaitsTotal:      t.originWaitsTotal,
+		UrgentPromotionsTotal: t.urgentPromotionsTotal,
+		Pods:                  make(map[string]podDump),
 	}
 	for _, st := range t.programs {
 		state.TotalPrograms++

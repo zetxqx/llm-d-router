@@ -348,6 +348,112 @@ func TestOriginOnlyLeavesNewProgramsUnaffected(t *testing.T) {
 	assert.Equal(t, "default/pod2", res.pod)
 }
 
+func urgentConfig(originOnly bool) Config {
+	cfg := testConfig()
+	cfg.UrgentWaitMs = 15000
+	if originOnly {
+		cfg.ResumePlacement = ResumePlacementOriginOnly
+	}
+	return cfg
+}
+
+// An urgent paused program (head waited past urgentWaitMs) outranks a smaller
+// paused program that is not urgent; without the tier the smaller one wins.
+func TestUrgentPausedOutranksSmallerNonUrgent(t *testing.T) {
+	for _, tier := range []bool{false, true} {
+		cfg := testConfig()
+		if tier {
+			cfg.UrgentWaitMs = 15000
+		}
+		a := newTestAgent(cfg)
+		sched := newTestEndpoints("pod1")
+		seedProgram(t, a, "big", sched[0], 400)
+		seedProgram(t, a, "small", sched[0], 100)
+		forcePause(a, "big")
+		forcePause(a, "small")
+		primeFitView(a, "pod1") // room 900: both fit
+
+		big := makeQueueWithBytes("big", 1, time.Now().Add(-20*time.Second), 400*4)
+		small := makeQueueWithBytes("small", 1, time.Now().Add(-time.Second), 100*4)
+		picked, err := a.Pick(context.Background(), bandOf(small, big))
+		require.NoError(t, err)
+		if tier {
+			assert.Same(t, big, picked, "urgent tier: the head that waited 20 s goes first")
+			assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.urgentPromotions))
+		} else {
+			assert.Same(t, small, picked, "no tier: smallest footprint first")
+			assert.Equal(t, 0.0, testutil.ToFloat64(a.metrics.urgentPromotions))
+		}
+	}
+}
+
+// Under origin-only an urgent paused program may take another pod with room.
+func TestUrgentReleasesOriginOnly(t *testing.T) {
+	a := newTestAgent(urgentConfig(true))
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700) // pod1 room 200
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2") // pod2 room 900
+
+	q := makeQueueWithBytes("veteran", 1, time.Now().Add(-5*time.Second), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	assert.Nil(t, picked, "5 s: not urgent yet, waits for the origin")
+
+	q = makeQueueWithBytes("veteran", 1, time.Now().Add(-20*time.Second), 300*4)
+	picked, err = a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	require.Same(t, q, picked)
+	res, ok := reservationOf(a, "veteran")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod2", res.pod, "urgent: moves to the pod with room")
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.urgentPromotions))
+	req := newRequest("veteran", 300*4)
+	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(sched[1])))
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.rebinds))
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.originWaits), "it had been held for the origin before turning urgent")
+}
+
+// Urgency does not bypass the fit check: with no room anywhere the program
+// stays held (only the starvation backstop bypasses fit).
+func TestUrgentStillNeedsRoom(t *testing.T) {
+	a := newTestAgent(urgentConfig(true))
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700)
+	seedProgram(t, a, "other", sched[1], 800) // pod2 room 100
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2")
+
+	q := makeQueueWithBytes("veteran", 1, time.Now().Add(-20*time.Second), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	assert.Nil(t, picked)
+	assert.Equal(t, 0.0, testutil.ToFloat64(a.metrics.urgentPromotions))
+}
+
+// An urgent new program outranks a non-urgent paused one; two urgent heads go
+// oldest first regardless of class and size.
+func TestUrgentOrdersOldestFirstAcrossClasses(t *testing.T) {
+	a := newTestAgent(urgentConfig(false))
+	sched := newTestEndpoints("pod1")
+	seedProgram(t, a, "veteran", sched[0], 100)
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1")
+
+	veteran := makeQueueWithBytes("veteran", 1, time.Now().Add(-time.Second), 100*4)
+	rookie := makeQueueWithBytes("rookie", 1, time.Now().Add(-20*time.Second), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(veteran, rookie))
+	require.NoError(t, err)
+	assert.Same(t, rookie, picked, "urgent new beats non-urgent paused")
+
+	veteran = makeQueueWithBytes("veteran", 1, time.Now().Add(-30*time.Second), 100*4)
+	picked, err = a.Pick(context.Background(), bandOf(rookie, veteran))
+	require.NoError(t, err)
+	assert.Same(t, veteran, picked, "both urgent: the older head first")
+}
+
 // A paused program outranks a never-admitted one when both fit, regardless of
 // size and enqueue order (upstream's REASONING group precedes NEW).
 func TestPick_PausedBeatsNewcomer(t *testing.T) {

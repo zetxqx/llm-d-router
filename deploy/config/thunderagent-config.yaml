@@ -46,6 +46,7 @@ plugins:
     pauseSweepSeconds: 5              # upstream scheduler interval; 0 sweeps every dispatch cycle
     kvUsageCorrection: false          # upstream shared_tokens; never active upstream
     resumePlacement: most-room        # origin pod if it fits, else most room (upstream BFD); origin-only waits for the origin pod
+    urgentWaitMs: 0                   # >0: heads waiting this long go first (oldest first) and may leave their origin pod; set to the TTFT SLO minus one re-prefill
     headWaitStarvationMs: 1800000     # upstream forced resume after 1800 s; 30000 for the improved variant
     evictionTtlSeconds: 3600          # must exceed headWaitStarvationMs
     evictionSweepSeconds: 300
