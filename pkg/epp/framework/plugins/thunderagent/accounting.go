@@ -90,6 +90,9 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 	}
 	if originWaited {
 		a.metrics.originWaits.Inc()
+		if rebound {
+			a.metrics.originWaitMoves.Inc()
+		}
 	}
 	request.PutAttribute(inflightStateKey, inflightState{estimate: estimate, applied: estimate})
 	return nil

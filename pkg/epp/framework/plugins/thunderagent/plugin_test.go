@@ -48,6 +48,14 @@ func TestFactory(t *testing.T) {
 		assert.Equal(t, 0.0, a.urgentWaitMs, "urgent tier off by default")
 		assert.False(t, a.urgentMove)
 		assert.False(t, a.urgentReserveOrigin)
+		assert.Equal(t, 0.0, a.originWaitMaxMs)
+	})
+
+	t.Run("origin wait cap", func(t *testing.T) {
+		params := json.NewDecoder(bytes.NewBufferString(`{"resumePlacement": "origin-only", "originWaitMaxMs": 8000}`))
+		p, err := Factory("test", params, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 8000.0, p.(*ThunderAgent).originWaitMaxMs)
 	})
 
 	t.Run("urgent tier", func(t *testing.T) {
@@ -86,6 +94,8 @@ func TestFactory(t *testing.T) {
 		"urgent":           `{"urgentWaitMs": -1}`,
 		"urgent above":     `{"urgentWaitMs": 1800000}`, // not below headWaitStarvationMs: the tier would never apply
 		"move w/o tier":    `{"urgentMove": true}`,
+		"cap negative":     `{"resumePlacement": "origin-only", "originWaitMaxMs": -1}`,
+		"cap most-room":    `{"originWaitMaxMs": 8000}`, // meaningless under most-room: rejected
 		"reserve w/o tier": `{"urgentReserveOrigin": true}`,
 	}
 	for name, raw := range invalid {

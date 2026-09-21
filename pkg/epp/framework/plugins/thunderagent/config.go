@@ -76,6 +76,14 @@ type Config struct {
 	// has room, unless the origin left the pool or HeadWaitStarvationMs
 	// fires. New programs always go to the pod with the most room.
 	ResumePlacement string `json:"resumePlacement"`
+	// OriginWaitMaxMs caps how long a paused program waits for its origin pod
+	// under origin-only placement: past it the program may take the pod with
+	// the most room. Ordering is unchanged (smallest first). Set it just
+	// inside the time a paused prefix survives on its pod (about 8 s at 32
+	// sessions per pod on the measured pool); a wait beyond that only adds
+	// delay to the same re-prefill. 0 (default) never moves. Proposal Part 8,
+	// layer 1.
+	OriginWaitMaxMs float64 `json:"originWaitMaxMs"`
 	// UrgentWaitMs is the urgent tier: a paused or new program whose head has
 	// waited at least this long is ordered ahead of every non-urgent paused or
 	// new program (oldest first) and, under origin-only placement, may take
@@ -152,6 +160,12 @@ func (c Config) validate() error {
 	}
 	if c.UrgentWaitMs < 0 {
 		return fmt.Errorf("urgentWaitMs must be >= 0, got %v", c.UrgentWaitMs)
+	}
+	if c.OriginWaitMaxMs < 0 {
+		return fmt.Errorf("originWaitMaxMs must be >= 0, got %v", c.OriginWaitMaxMs)
+	}
+	if c.OriginWaitMaxMs > 0 && c.ResumePlacement != ResumePlacementOriginOnly {
+		return fmt.Errorf("originWaitMaxMs needs resumePlacement %q", ResumePlacementOriginOnly)
 	}
 	if (c.UrgentMove || c.UrgentReserveOrigin) && c.UrgentWaitMs <= 0 {
 		return errors.New("urgentMove and urgentReserveOrigin need urgentWaitMs > 0")

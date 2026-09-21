@@ -734,6 +734,84 @@ func TestReserveOriginClosesPodToMovers(t *testing.T) {
 	assert.Equal(t, "default/pod2", res.pod)
 }
 
+func originCapConfig() Config {
+	cfg := originOnlyConfig()
+	cfg.OriginWaitMaxMs = 8000
+	return cfg
+}
+
+// originWaitMaxMs: a paused program waits for its full origin until the cap,
+// then takes the pod with the most room; the move is counted as an origin
+// wait move. Ordering is untouched.
+func TestOriginWaitCapMovesAfterTheCap(t *testing.T) {
+	a := newTestAgent(originCapConfig())
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700) // pod1 room 200
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2") // pod2 room 900
+
+	q := makeQueueWithBytes("veteran", 1, time.Now().Add(-5*time.Second), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	assert.Nil(t, picked, "5 s: still waiting for the origin")
+	assert.True(t, isOriginHeld(a, "veteran"))
+
+	q = makeQueueWithBytes("veteran", 1, time.Now().Add(-9*time.Second), 300*4)
+	picked, err = a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	require.Same(t, q, picked)
+	res, ok := reservationOf(a, "veteran")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod2", res.pod, "past the cap: the pod with the most room")
+	assert.Equal(t, 0.0, testutil.ToFloat64(a.metrics.urgentPromotions), "not the urgent tier")
+	require.NoError(t, a.PreRequest(context.Background(), newRequest("veteran", 300*4), schedulingResultFor(sched[1])))
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.rebinds))
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.originWaits))
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.originWaitMoves))
+}
+
+// Past the cap the origin still wins when it fits, and a capped program does
+// not jump the size ordering: a smaller paused program that fits goes first.
+func TestOriginWaitCapKeepsOriginPreferenceAndOrdering(t *testing.T) {
+	a := newTestAgent(originCapConfig())
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "small", sched[0], 100)
+	forcePause(a, "veteran")
+	forcePause(a, "small")
+	primeFitView(a, "pod1", "pod2") // pod1 room 900: both fit their origin
+
+	veteran := makeQueueWithBytes("veteran", 1, time.Now().Add(-20*time.Second), 300*4)
+	small := makeQueueWithBytes("small", 1, time.Now().Add(-time.Second), 100*4)
+	picked, err := a.Pick(context.Background(), bandOf(veteran, small))
+	require.NoError(t, err)
+	assert.Same(t, small, picked, "smallest first, the cap does not reorder")
+
+	picked, err = a.Pick(context.Background(), bandOf(veteran))
+	require.NoError(t, err)
+	require.Same(t, veteran, picked)
+	res, ok := reservationOf(a, "veteran")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod1", res.pod, "the origin fits, so even past the cap it stays home")
+}
+
+// With the cap passed but nowhere to go, the program keeps waiting.
+func TestOriginWaitCapStillNeedsRoom(t *testing.T) {
+	a := newTestAgent(originCapConfig())
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700)
+	seedProgram(t, a, "other", sched[1], 800) // pod2 room 100
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2")
+
+	q := makeQueueWithBytes("veteran", 1, time.Now().Add(-20*time.Second), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	assert.Nil(t, picked)
+}
+
 // A paused program outranks a never-admitted one when both fit, regardless of
 // size and enqueue order (upstream's REASONING group precedes NEW).
 func TestPick_PausedBeatsNewcomer(t *testing.T) {

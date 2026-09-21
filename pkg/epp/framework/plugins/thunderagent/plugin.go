@@ -112,6 +112,7 @@ type ThunderAgent struct {
 	pauseSweep             time.Duration
 	kvUsageCorrection      bool
 	resumeOriginOnly       bool
+	originWaitMaxMs        float64
 	urgentWaitMs           float64
 	urgentMove             bool
 	urgentReserveOrigin    bool
@@ -159,6 +160,7 @@ func newThunderAgent(name string, cfg Config) *ThunderAgent {
 		pauseSweep:             time.Duration(cfg.PauseSweepSeconds * float64(time.Second)),
 		kvUsageCorrection:      cfg.KVUsageCorrection,
 		resumeOriginOnly:       cfg.ResumePlacement == ResumePlacementOriginOnly,
+		originWaitMaxMs:        cfg.OriginWaitMaxMs,
 		urgentWaitMs:           cfg.UrgentWaitMs,
 		urgentMove:             cfg.UrgentMove,
 		urgentReserveOrigin:    cfg.UrgentReserveOrigin,

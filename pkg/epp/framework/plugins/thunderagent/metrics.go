@@ -43,6 +43,7 @@ type thunderMetrics struct {
 	pauses               prometheus.Counter
 	resumes              prometheus.Counter
 	originWaits          prometheus.Counter
+	originWaitMoves      prometheus.Counter
 	urgentPromotions     prometheus.Counter
 	sessionFinalReleases prometheus.Counter
 	ttlEvictions         prometheus.Counter
@@ -105,6 +106,11 @@ func newThunderMetrics() *thunderMetrics {
 			Name:      "thunder_agent_origin_waits_total",
 			Help:      metricsutil.HelpMsgWithStability("Resumes of paused programs that were held at least once because their origin pod had no room while another pod did (resumePlacement origin-only).", compbasemetrics.ALPHA),
 		}),
+		originWaitMoves: prometheus.NewCounter(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_origin_wait_moves_total",
+			Help:      metricsutil.HelpMsgWithStability("Resumes that waited for their origin pod and then moved to another pod (originWaitMaxMs or urgentMove).", compbasemetrics.ALPHA),
+		}),
 		urgentPromotions: prometheus.NewCounter(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "thunder_agent_urgent_promotions_total",
@@ -140,6 +146,7 @@ func (m *thunderMetrics) register(reg prometheus.Registerer) error {
 		registerOrReuse(reg, &m.pauses),
 		registerOrReuse(reg, &m.resumes),
 		registerOrReuse(reg, &m.originWaits),
+		registerOrReuse(reg, &m.originWaitMoves),
 		registerOrReuse(reg, &m.urgentPromotions),
 		registerOrReuse(reg, &m.sessionFinalReleases),
 		registerOrReuse(reg, &m.ttlEvictions),
