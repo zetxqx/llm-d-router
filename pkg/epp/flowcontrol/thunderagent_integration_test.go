@@ -488,6 +488,7 @@ const thunderPauseParamsUrgent = `{
 	"actingHalfLifeSeconds": 0,
 	"bufferTokensPerProgram": 0,
 	"urgentWaitMs": 100,
+	"urgentMove": true,
 	"headWaitStarvationMs": 300,
 	"evictionTtlSeconds": 3600,
 	"evictionSweepSeconds": 300,

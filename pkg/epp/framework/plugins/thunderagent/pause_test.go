@@ -352,6 +352,7 @@ func TestOriginOnlyLeavesNewProgramsUnaffected(t *testing.T) {
 func urgentConfig(originOnly bool) Config {
 	cfg := testConfig()
 	cfg.UrgentWaitMs = 15000
+	cfg.UrgentMove = true
 	if originOnly {
 		cfg.ResumePlacement = ResumePlacementOriginOnly
 	}
@@ -580,6 +581,7 @@ func TestUrgentBeatsStreamOfSmallNewcomers(t *testing.T) {
 		cfg := originOnlyConfig()
 		if tier {
 			cfg.UrgentWaitMs = 15000
+			cfg.UrgentMove = true
 		}
 		a := newTestAgent(cfg)
 		sched := newTestEndpoints("pod1", "pod2")
@@ -613,6 +615,123 @@ func TestUrgentBeatsStreamOfSmallNewcomers(t *testing.T) {
 			assert.False(t, bigPicked, "plain origin-only: the origin is full, newcomers take pod2 every cycle")
 		}
 	}
+}
+
+func ageOnlyConfig(reserve bool) Config {
+	cfg := originOnlyConfig()
+	cfg.UrgentWaitMs = 15000
+	cfg.UrgentMove = false
+	cfg.UrgentReserveOrigin = reserve
+	return cfg
+}
+
+// Age-only (urgentMove off): an urgent paused program keeps waiting for its
+// origin even though another pod has room; once the origin has room it goes
+// first, ahead of a smaller non-urgent paused program from the same pod.
+func TestAgeOnlyWaitsForOriginThenGoesFirst(t *testing.T) {
+	a := newTestAgent(ageOnlyConfig(false))
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "big", sched[0], 300)
+	seedProgram(t, a, "small", sched[0], 100)
+	seedProgram(t, a, "runner", sched[0], 700) // pod1 room 200 once both are paused
+	forcePause(a, "big")
+	forcePause(a, "small")
+	primeFitView(a, "pod1", "pod2") // pod2 room 900
+
+	big := makeQueueWithBytes("big", 1, time.Now().Add(-20*time.Second), 300*4)
+	small := makeQueueWithBytes("small", 1, time.Now().Add(-time.Second), 100*4)
+	picked, err := a.Pick(context.Background(), bandOf(big, small))
+	require.NoError(t, err)
+	assert.Same(t, small, picked, "big does not fit pod1 and may not move; small fits and goes")
+	_, reserved := reservationOf(a, "big")
+	assert.False(t, reserved)
+	assert.Equal(t, 0.0, testutil.ToFloat64(a.metrics.urgentPromotions))
+
+	// pod1 frees up: the urgent program goes before the small one.
+	a2 := newTestAgent(ageOnlyConfig(false))
+	seedProgram(t, a2, "big", sched[0], 300)
+	seedProgram(t, a2, "small", sched[0], 100)
+	forcePause(a2, "big")
+	forcePause(a2, "small")
+	primeFitView(a2, "pod1", "pod2") // pod1 room 900
+	picked, err = a2.Pick(context.Background(), bandOf(small, big))
+	require.NoError(t, err)
+	assert.Same(t, big, picked)
+	res, ok := reservationOf(a2, "big")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod1", res.pod, "stays on its origin")
+	assert.Equal(t, 1.0, testutil.ToFloat64(a2.metrics.urgentPromotions))
+}
+
+// Reservation: while an urgent paused program does not fit its origin, that
+// pod admits nobody else, so room accumulates for it; running programs' turns
+// are unaffected; the reservation lifts as soon as the waiter fits.
+func TestReserveOriginHoldsRoomForUrgentWaiter(t *testing.T) {
+	a := newTestAgent(ageOnlyConfig(true))
+	sched := newTestEndpoints("pod1")
+	seedProgram(t, a, "big", sched[0], 300)
+	seedProgram(t, a, "small", sched[0], 100)
+	seedProgram(t, a, "runner", sched[0], 700) // pod1 room 200
+	forcePause(a, "big")
+	forcePause(a, "small")
+	primeFitView(a, "pod1")
+
+	big := makeQueueWithBytes("big", 1, time.Now().Add(-20*time.Second), 300*4)
+	small := makeQueueWithBytes("small", 1, time.Now().Add(-time.Second), 100*4)
+	rookie := makeQueueWithBytes("rookie", 1, time.Now(), 50*4)
+	picked, err := a.Pick(context.Background(), bandOf(small, rookie, big))
+	require.NoError(t, err)
+	assert.Nil(t, picked, "pod1 is reserved for big: neither the small paused program nor the newcomer is admitted")
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.reservedPods))
+	raw, err := a.DumpState()
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"reservedPods":1`)
+
+	// A running program's turn on the reserved pod still dispatches.
+	running := makeQueueWithBytes("runner", 1, time.Now(), 100*4)
+	picked, err = a.Pick(context.Background(), bandOf(small, rookie, big, running))
+	require.NoError(t, err)
+	assert.Same(t, running, picked)
+
+	// The runner shrinks (room 600): big fits, goes first, and the reservation lifts.
+	seedProgram(t, a, "runner", sched[0], 300)
+	primeFitView(a, "pod1")
+	picked, err = a.Pick(context.Background(), bandOf(small, rookie, big))
+	require.NoError(t, err)
+	assert.Same(t, big, picked)
+	assert.Equal(t, 0.0, testutil.ToFloat64(a.metrics.reservedPods), "big fits now, nothing is reserved")
+	require.NoError(t, a.PreRequest(context.Background(), newRequest("big", 300*4), schedulingResultFor(sched[0])))
+	primeFitView(a, "pod1")
+	picked, err = a.Pick(context.Background(), bandOf(small, rookie))
+	require.NoError(t, err)
+	assert.Same(t, small, picked, "with big admitted the others are admitted again")
+}
+
+// A reserved pod is also closed to programs from other pods that would move
+// onto it, and to newcomers, while other pods stay open.
+func TestReserveOriginClosesPodToMovers(t *testing.T) {
+	cfg := testConfig() // most-room placement
+	cfg.UrgentWaitMs = 15000
+	cfg.UrgentReserveOrigin = true
+	a := newTestAgent(cfg)
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "big", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700) // pod1 room 200: big does not fit
+	seedProgram(t, a, "guest", sched[1], 300)
+	seedProgram(t, a, "filler", sched[1], 650) // pod2 room 250: guest (300) does not fit its origin
+	forcePause(a, "big")
+	forcePause(a, "guest")
+	primeFitView(a, "pod1", "pod2")
+
+	big := makeQueueWithBytes("big", 1, time.Now().Add(-20*time.Second), 300*4)
+	guest := makeQueueWithBytes("guest", 1, time.Now().Add(-time.Second), 300*4)
+	rookie := makeQueueWithBytes("rookie", 1, time.Now(), 50*4)
+	picked, err := a.Pick(context.Background(), bandOf(guest, rookie, big))
+	require.NoError(t, err)
+	require.Same(t, rookie, picked, "guest would move to pod1 (reserved): held; the newcomer takes pod2")
+	res, ok := reservationOf(a, "rookie")
+	require.True(t, ok)
+	assert.Equal(t, "default/pod2", res.pod)
 }
 
 // A paused program outranks a never-admitted one when both fit, regardless of

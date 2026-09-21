@@ -84,6 +84,16 @@ type Config struct {
 	// minus the cost of one re-prefill. 0 disables the tier. Not upstream
 	// behaviour (proposal Part 1 aging plus Part 3 Option B).
 	UrgentWaitMs float64 `json:"urgentWaitMs"`
+	// UrgentMove lets an urgent paused program leave its origin pod for the
+	// pod with the most room under origin-only placement. Off, the urgent
+	// tier only reorders (age-only): the program still waits for its origin.
+	UrgentMove bool `json:"urgentMove"`
+	// UrgentReserveOrigin reserves a pod for the urgent paused programs
+	// waiting on it: while such a program does not fit, no new program and no
+	// non-urgent paused program is admitted onto that pod, so freed room
+	// accumulates for the oldest waiter instead of going to smaller newcomers.
+	// Turns of programs already running on the pod are unaffected.
+	UrgentReserveOrigin bool `json:"urgentReserveOrigin"`
 	// HeadWaitStarvationMs promotes any queue whose head has waited at least
 	// this long ahead of class, size and fit. This is the forced-admission
 	// backstop (upstream _wait_for_resume timeout, 1800 s). 0 disables it.
@@ -142,6 +152,9 @@ func (c Config) validate() error {
 	}
 	if c.UrgentWaitMs < 0 {
 		return fmt.Errorf("urgentWaitMs must be >= 0, got %v", c.UrgentWaitMs)
+	}
+	if (c.UrgentMove || c.UrgentReserveOrigin) && c.UrgentWaitMs <= 0 {
+		return errors.New("urgentMove and urgentReserveOrigin need urgentWaitMs > 0")
 	}
 	if c.UrgentWaitMs > 0 && c.HeadWaitStarvationMs > 0 && c.UrgentWaitMs >= c.HeadWaitStarvationMs {
 		return fmt.Errorf("urgentWaitMs (%v) must be below headWaitStarvationMs (%v), or the urgent tier never applies", c.UrgentWaitMs, c.HeadWaitStarvationMs)

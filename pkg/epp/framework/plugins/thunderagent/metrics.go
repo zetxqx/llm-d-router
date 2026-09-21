@@ -34,6 +34,7 @@ type thunderMetrics struct {
 	podUtilization    *prometheus.GaugeVec
 	podCapacityTokens *prometheus.GaugeVec
 	programs          *prometheus.GaugeVec
+	reservedPods      prometheus.Gauge
 
 	holds                *prometheus.CounterVec
 	releases             *prometheus.CounterVec
@@ -64,6 +65,11 @@ func newThunderMetrics() *thunderMetrics {
 			Name:      "thunder_agent_programs",
 			Help:      metricsutil.HelpMsgWithStability("Tracked programs by state: running, idle, marked, paused.", compbasemetrics.ALPHA),
 		}, []string{"state"}),
+		reservedPods: prometheus.NewGauge(prometheus.GaugeOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_reserved_pods",
+			Help:      metricsutil.HelpMsgWithStability("Pods closed to new and non-urgent paused admissions in the last dispatch cycle because an urgent paused program is waiting for them (urgentReserveOrigin).", compbasemetrics.ALPHA),
+		}),
 		holds: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
 			Name:      "thunder_agent_holds_total",
@@ -126,6 +132,7 @@ func (m *thunderMetrics) register(reg prometheus.Registerer) error {
 		registerOrReuse(reg, &m.podUtilization),
 		registerOrReuse(reg, &m.podCapacityTokens),
 		registerOrReuse(reg, &m.programs),
+		registerOrReuse(reg, &m.reservedPods),
 		registerOrReuse(reg, &m.holds),
 		registerOrReuse(reg, &m.releases),
 		registerOrReuse(reg, &m.starvationPromotions),

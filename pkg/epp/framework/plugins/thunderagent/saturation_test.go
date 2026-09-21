@@ -87,7 +87,7 @@ func TestSaturationRequireRealCapacity(t *testing.T) {
 	a.Saturation(context.Background(), dlEndpoints("pod1"))
 
 	a.table.mu.Lock()
-	_, ok := a.fitPodLocked(100, "", map[string]float64{}, false)
+	_, ok := a.fitPodLocked(100, "", map[string]float64{}, false, nil)
 	a.table.mu.Unlock()
 	assert.False(t, ok, "a pod without scraped capacity has no room for new programs")
 }

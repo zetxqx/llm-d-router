@@ -41,6 +41,7 @@ type dumpState struct {
 	ResumesTotal          int64              `json:"resumesTotal"`
 	OriginWaitsTotal      int64              `json:"originWaitsTotal"`
 	UrgentPromotionsTotal int64              `json:"urgentPromotionsTotal"`
+	ReservedPods          int                `json:"reservedPods"`
 	Pods                  map[string]podDump `json:"pods"`
 }
 
@@ -54,6 +55,7 @@ func (a *ThunderAgent) DumpState() (json.RawMessage, error) {
 		ResumesTotal:          t.resumesTotal,
 		OriginWaitsTotal:      t.originWaitsTotal,
 		UrgentPromotionsTotal: t.urgentPromotionsTotal,
+		ReservedPods:          t.reservedPods,
 		Pods:                  make(map[string]podDump),
 	}
 	for _, st := range t.programs {

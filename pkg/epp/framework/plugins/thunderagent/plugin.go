@@ -113,6 +113,8 @@ type ThunderAgent struct {
 	kvUsageCorrection      bool
 	resumeOriginOnly       bool
 	urgentWaitMs           float64
+	urgentMove             bool
+	urgentReserveOrigin    bool
 	headWaitStarvationMs   float64
 	sessionFinalHeader     string
 	parentSessionHeader    string
@@ -158,6 +160,8 @@ func newThunderAgent(name string, cfg Config) *ThunderAgent {
 		kvUsageCorrection:      cfg.KVUsageCorrection,
 		resumeOriginOnly:       cfg.ResumePlacement == ResumePlacementOriginOnly,
 		urgentWaitMs:           cfg.UrgentWaitMs,
+		urgentMove:             cfg.UrgentMove,
+		urgentReserveOrigin:    cfg.UrgentReserveOrigin,
 		headWaitStarvationMs:   cfg.HeadWaitStarvationMs,
 		sessionFinalHeader:     strings.ToLower(strings.TrimSpace(cfg.SessionFinalHeader)),
 		parentSessionHeader:    strings.ToLower(strings.TrimSpace(cfg.ParentSessionHeader)),

@@ -77,10 +77,11 @@ const holdWaitFloor = time.Second
 // origin instead of moving. A fitting program gets a reservation charged to the pod
 // that fit it, released when PreRequest binds the program. A paused or new
 // head waiting past urgentWaitMs is urgent: it outranks every non-urgent
-// paused or new program (oldest first) and may take any pod with room even
-// under origin-only, but it still needs room. A head waiting past
-// headWaitStarvationMs dispatches regardless of class, size, or fit, oldest
-// first: the forced-admission backstop.
+// paused or new program (oldest first); with urgentMove it may also take any
+// pod with room under origin-only; with urgentReserveOrigin the pod it waits
+// for admits no other paused or new program until it fits. It still needs
+// room. A head waiting past headWaitStarvationMs dispatches regardless of
+// class, size, or fit, oldest first: the forced-admission backstop.
 //
 // Returning nil while only non-fitting paused or new programs wait is the
 // hold: the processor dispatches nothing and retries next cycle.
@@ -116,6 +117,35 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 	t := a.table
 	t.mu.Lock()
 	pendingByPod := t.pendingByPod(now)
+	// Pods reserved for urgent paused programs that do not fit their origin
+	// yet: closed to every other paused or new admission this cycle.
+	reserved := map[string]bool{}
+	if a.urgentReserveOrigin && a.urgentWaitMs > 0 {
+		band.IterateQueues(func(queue fwkfc.FlowQueueAccessor) bool {
+			if queue == nil || queue.Len() == 0 {
+				return true
+			}
+			head := queue.Peek()
+			if head == nil {
+				return true
+			}
+			id := queue.FlowKey().ID
+			waitMs := float64(now.Sub(head.EnqueueTime()).Milliseconds())
+			class, tokens := t.classAndTokens(id)
+			if class != classPaused || waitMs < a.urgentWaitMs || (a.headWaitStarvationMs > 0 && waitMs >= a.headWaitStarvationMs) {
+				return true
+			}
+			if est := float64(t.estimateTokens(headSizeBytes(head))); est > tokens {
+				tokens = est
+			}
+			origin := t.programs[id].podName
+			if snap, ok := t.snapshot[origin]; ok && snap.room-pendingByPod[origin] < tokens+a.bufferTokensPerProgram {
+				reserved[origin] = true
+			}
+			return true
+		})
+	}
+	t.reservedPods = len(reserved)
 	band.IterateQueues(func(queue fwkfc.FlowQueueAccessor) bool {
 		// Empty entries appear transiently when a queue drains between
 		// iteration and scoring; they carry nothing to service.
@@ -145,15 +175,21 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 				preferred = t.programs[id].podName
 			}
 			required := tokens + a.bufferTokensPerProgram
-			// An urgent program is released from the origin-only restriction.
-			pod, ok := a.fitPodLocked(required, preferred, pendingByPod, a.resumeOriginOnly && !urgent)
+			// With urgentMove an urgent program is released from the origin-only restriction.
+			waitForOrigin := a.resumeOriginOnly && !(urgent && a.urgentMove)
+			// A reserved pod is open only to the urgent programs waiting for it.
+			var blocked map[string]bool
+			if len(reserved) > 0 && !(urgent && reserved[preferred]) {
+				blocked = reserved
+			}
+			pod, ok := a.fitPodLocked(required, preferred, pendingByPod, waitForOrigin, blocked)
 			if !ok && !starving {
 				held++
-				if a.resumeOriginOnly && !urgent && preferred != "" {
+				if a.resumeOriginOnly && !(urgent && a.urgentMove) && preferred != "" {
 					// The hold is the policy's doing only if another pod
 					// would have taken the program; record it for the
 					// origin-waits counter at resume time.
-					if _, elsewhere := a.mostRoomLocked(required, pendingByPod); elsewhere {
+					if _, elsewhere := a.mostRoomLocked(required, pendingByPod, nil); elsewhere {
 						t.programs[id].originHeld = true
 					}
 				}
@@ -180,6 +216,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		t.urgentPromotionsTotal++
 	}
 	t.mu.Unlock()
+	a.metrics.reservedPods.Set(float64(len(reserved)))
 
 	if best == nil {
 		if held > 0 {
@@ -237,35 +274,40 @@ func (t *programTable) pendingByPod(now time.Time) map[string]float64 {
 // fitPodLocked returns the pod to admit a program of the required size onto,
 // if any. Room is the decayed admission room from the fit view minus live
 // reservations. The preferred pod (a paused program's origin, where its
-// prefix is warm) wins whenever it fits. When it does not, the pod with the
-// most room is chosen, unless waitForOrigin is set (origin-only placement and
-// the program is not urgent) and the preferred pod is still in the fit view:
-// then the program waits for it. A preferred pod missing from the fit view
-// (left the pool, or stale) is placed by room under either policy. With no
-// fit view the check fails open: the plugin is then not wired as the
-// saturation detector and only class ordering applies. Callers must hold t.mu.
-func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingByPod map[string]float64, waitForOrigin bool) (string, bool) {
+// prefix is warm) wins whenever it fits and is not blocked. When it does not
+// fit, the pod with the most room is chosen, unless waitForOrigin is set
+// (origin-only placement and the program may not move) and the preferred pod
+// is still in the fit view: then the program waits for it. Blocked pods
+// (reserved for urgent waiters) are never chosen. A preferred pod missing
+// from the fit view (left the pool, or stale) is placed by room under either
+// policy. With no fit view the check fails open: the plugin is then not wired
+// as the saturation detector and only class ordering applies. Callers must
+// hold t.mu.
+func (a *ThunderAgent) fitPodLocked(required float64, preferred string, pendingByPod map[string]float64, waitForOrigin bool, blocked map[string]bool) (string, bool) {
 	t := a.table
 	if len(t.snapshot) == 0 {
 		return "", true
 	}
 	if snap, ok := t.snapshot[preferred]; ok && preferred != "" {
-		if snap.room-pendingByPod[preferred] >= required {
+		if snap.room-pendingByPod[preferred] >= required && !blocked[preferred] {
 			return preferred, true
 		}
 		if waitForOrigin {
 			return "", false
 		}
 	}
-	return a.mostRoomLocked(required, pendingByPod)
+	return a.mostRoomLocked(required, pendingByPod, blocked)
 }
 
-// mostRoomLocked returns the pod with the most room net of reservations that
-// covers the required size, if any. Callers must hold t.mu.
-func (a *ThunderAgent) mostRoomLocked(required float64, pendingByPod map[string]float64) (string, bool) {
+// mostRoomLocked returns the unblocked pod with the most room net of
+// reservations that covers the required size, if any. Callers must hold t.mu.
+func (a *ThunderAgent) mostRoomLocked(required float64, pendingByPod map[string]float64, blocked map[string]bool) (string, bool) {
 	bestPod := ""
 	bestRoom := 0.0
 	for pod, snap := range a.table.snapshot {
+		if blocked[pod] {
+			continue
+		}
 		room := snap.room - pendingByPod[pod]
 		if room >= required && room > bestRoom {
 			bestPod, bestRoom = pod, room

@@ -135,6 +135,9 @@ type programTable struct {
 	originWaitsTotal int64
 	// urgentPromotionsTotal counts dispatches made from the urgent tier.
 	urgentPromotionsTotal int64
+	// reservedPods is the number of pods reserved for urgent waiters in the
+	// last dispatch cycle (urgentReserveOrigin).
+	reservedPods int
 }
 
 func newProgramTable(cfg Config) *programTable {
