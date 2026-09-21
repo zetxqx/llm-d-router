@@ -1,0 +1,75 @@
+apiVersion: inference.networking.x-k8s.io/v1alpha1
+kind: EndpointPickerConfig
+
+# ThunderAgent scheduling for agentic workloads, configured to reproduce the
+# upstream ThunderAgent router in "tr" mode with acting-token decay
+# (arXiv 2602.13692). Clients carry a program (trajectory) identifier in the
+# x-session-id header.
+#
+# One thunder-agent instance is referenced from three slots: the scheduling
+# profile (sticky placement and least-token-load spreading), the flow-control
+# saturation detector (which feeds the plugin's per-pod fit view and runs the
+# pause sweep, and never gates), and the fairness policy (the actual gate:
+# turns of admitted programs always dispatch; paused and new programs are
+# admitted only when they fit a pod, paused ones first, smallest first).
+#
+# Upstream defaults reproduced here: 1 s acting-token half-life, 5 s scheduler
+# tick (pause sweep), fit against full capacity with a 100-token buffer per
+# program, 1800 s forced admission, no shared_tokens correction (dead code
+# upstream). The improved variant for an A/B is headWaitStarvationMs: 30000
+# and pauseSweepSeconds: 0.
+#
+# No engine-load filter or scorer is configured: upstream has none, and the
+# utilization-detector filter would evict programs from their warm pod exactly
+# in the saturated regime this scheduler operates in. Anonymous requests (no
+# session header) get no scores and are placed arbitrarily.
+#
+# Held requests can wait up to headWaitStarvationMs. defaultRequestTTL is 0
+# (no queue eviction) to match upstream, so the gateway route timeout must be
+# raised accordingly, or clients disconnect before admission.
+
+featureGates:
+- flowControl
+
+plugins:
+- type: agent-identity
+  parameters:
+    additionalSessionHeaders:
+    - x-session-id
+- type: thunder-agent
+  name: thunder
+  parameters:
+    capacityTokens: 524288            # fallback when cache_config_info is absent
+    utilThreshold: 1.0                # upstream fits against full capacity; buffers are the headroom
+    actingHalfLifeSeconds: 1          # upstream decay is 2^-t with t in seconds
+    bufferTokensPerProgram: 100       # upstream BUFFER_PER_PROGRAM
+    pauseSweepSeconds: 5              # upstream scheduler interval; 0 sweeps every dispatch cycle
+    kvUsageCorrection: false          # upstream shared_tokens; never active upstream
+    resumePlacement: most-room        # origin pod if it fits, else most room (upstream BFD); origin-only waits for the origin pod
+    urgentWaitMs: 0                   # >0: heads waiting this long go first (oldest first); fit-checked
+    urgentMove: false                 # with origin-only: let an urgent head leave its origin pod (measured harmful at 15 s on a saturated pool)
+    urgentReserveOrigin: false        # close a pod to other admissions while an urgent head waits for it, so freed room accumulates for it
+    headWaitStarvationMs: 1800000     # upstream forced resume after 1800 s; 30000 for the improved variant
+    evictionTtlSeconds: 3600          # must exceed headWaitStarvationMs
+    evictionSweepSeconds: 300
+    sessionFinalHeader: x-session-final
+- type: max-score-picker
+- type: single-profile-handler
+
+flowControl:
+  # No queue eviction: upstream never rejects a held request, it force-admits
+  # at 1800 s, which the starvation guard reproduces.
+  defaultRequestTTL: "0s"
+  # The detector slot feeds the plugin its per-cycle view of the endpoint
+  # pool, runs the pause sweep, and always reports unsaturated; gating happens
+  # per program in the fairness policy.
+  saturationDetector:
+    pluginRef: thunder
+  defaultPriorityBand:
+    fairnessPolicyRef: thunder
+
+schedulingProfiles:
+- name: default
+  plugins:
+  - pluginRef: thunder
+  - pluginRef: max-score-picker
