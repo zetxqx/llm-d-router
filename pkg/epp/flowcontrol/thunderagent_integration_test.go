@@ -447,6 +447,41 @@ func TestThunderAgentUrgentTierDoesNotBypassFit(t *testing.T) {
 	assert.Equal(t, 0, dumpField(t, ta, "urgentPromotionsTotal"), "urgent but nowhere to go: no urgent dispatch")
 }
 
+// On a two-pod pool the urgent tier ends an origin-only hold as soon as the
+// program has waited urgentWaitMs: the veteran, paused on a full pod-1, is
+// dispatched to the empty pod-2 between 100 ms and the 300 ms backstop.
+func TestThunderAgentUrgentMovesToPodWithRoom(t *testing.T) {
+	t.Parallel()
+	ta := newThunderForIntegration(t, thunderPauseParamsUrgent)
+	h := newHarness(t, harnessOpts{
+		detector:           ta,
+		fairness:           ta,
+		endpointCandidates: thunderCandidatesTwoPods(),
+	})
+
+	runTurn(t, ta, "veteran", 400)
+	runTurn(t, ta, "runner", 900) // pod-1: 1300 > 900, the veteran is paused
+	require.Eventually(t, func() bool { return pausesTotal(t, ta) >= 1 }, 5*time.Second, time.Millisecond)
+
+	started := time.Now()
+	done := enqueueTurn(h, "veteran")
+	requireHeld(t, done, 50*time.Millisecond)
+	requireDispatched(t, done, 5*time.Second)
+	elapsed := time.Since(started)
+	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "held until the urgent threshold")
+	assert.Less(t, elapsed, 300*time.Millisecond, "released by the urgent tier, not the backstop")
+	assert.Equal(t, 1, dumpField(t, ta, "urgentPromotionsTotal"))
+}
+
+func thunderCandidatesTwoPods() *contractmocks.MockEndpointCandidates {
+	var eps []datalayer.Endpoint
+	for _, name := range []string{"pod-1", "pod-2"} {
+		meta := &datalayer.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: name}}
+		eps = append(eps, datalayer.NewEndpoint(meta, datalayer.NewMetrics()))
+	}
+	return &contractmocks.MockEndpointCandidates{Candidates: eps}
+}
+
 const thunderPauseParamsUrgent = `{
 	"capacityTokens": 1000,
 	"utilThreshold": 0.9,

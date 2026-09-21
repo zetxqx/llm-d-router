@@ -18,6 +18,7 @@ package thunderagent
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -452,6 +453,166 @@ func TestUrgentOrdersOldestFirstAcrossClasses(t *testing.T) {
 	picked, err = a.Pick(context.Background(), bandOf(rookie, veteran))
 	require.NoError(t, err)
 	assert.Same(t, veteran, picked, "both urgent: the older head first")
+}
+
+// The starvation backstop still outranks the urgent tier.
+func TestStarvingOutranksUrgent(t *testing.T) {
+	cfg := urgentConfig(false)
+	cfg.HeadWaitStarvationMs = 60000
+	a := newTestAgent(cfg)
+	sched := newTestEndpoints("pod1")
+	seedProgram(t, a, "old", sched[0], 100)
+	seedProgram(t, a, "older", sched[0], 100)
+	forcePause(a, "old")
+	forcePause(a, "older")
+	primeFitView(a, "pod1")
+
+	urgent := makeQueueWithBytes("old", 1, time.Now().Add(-30*time.Second), 100*4)
+	starving := makeQueueWithBytes("older", 1, time.Now().Add(-90*time.Second), 100*4)
+	picked, err := a.Pick(context.Background(), bandOf(urgent, starving))
+	require.NoError(t, err)
+	assert.Same(t, starving, picked)
+	assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.starvationPromotions))
+	assert.Equal(t, 0.0, testutil.ToFloat64(a.metrics.urgentPromotions), "a starving head is not counted as urgent")
+}
+
+// An urgent paused head is served before a running program's turn in the same
+// cycle; a non-urgent paused head is not (REASONING first, as upstream).
+func TestUrgentPausedOutranksReasoningTurn(t *testing.T) {
+	a := newTestAgent(urgentConfig(false))
+	sched := newTestEndpoints("pod1")
+	seedProgram(t, a, "running", sched[0], 100)
+	seedProgram(t, a, "paused", sched[0], 100)
+	forcePause(a, "paused")
+	primeFitView(a, "pod1")
+
+	running := makeQueueWithBytes("running", 1, time.Now(), 100*4)
+	paused := makeQueueWithBytes("paused", 1, time.Now().Add(-time.Second), 100*4)
+	picked, err := a.Pick(context.Background(), bandOf(paused, running))
+	require.NoError(t, err)
+	assert.Same(t, running, picked, "not urgent: the running program's turn goes first")
+
+	paused = makeQueueWithBytes("paused", 1, time.Now().Add(-20*time.Second), 100*4)
+	picked, err = a.Pick(context.Background(), bandOf(running, paused))
+	require.NoError(t, err)
+	assert.Same(t, paused, picked, "urgent: the paused head goes first")
+}
+
+// Under most-room the tier only reorders; placement is unchanged (origin if it
+// fits, else the pod with the most room) and the dispatch is still counted.
+func TestUrgentUnderMostRoomKeepsPlacement(t *testing.T) {
+	for _, originFull := range []bool{false, true} {
+		a := newTestAgent(urgentConfig(false))
+		sched := newTestEndpoints("pod1", "pod2")
+		seedProgram(t, a, "veteran", sched[0], 300)
+		if originFull {
+			seedProgram(t, a, "runner", sched[0], 700) // pod1 room 200
+		}
+		forcePause(a, "veteran")
+		primeFitView(a, "pod1", "pod2")
+
+		q := makeQueueWithBytes("veteran", 1, time.Now().Add(-20*time.Second), 300*4)
+		picked, err := a.Pick(context.Background(), bandOf(q))
+		require.NoError(t, err)
+		require.Same(t, q, picked)
+		res, ok := reservationOf(a, "veteran")
+		require.True(t, ok)
+		if originFull {
+			assert.Equal(t, "default/pod2", res.pod)
+		} else {
+			assert.Equal(t, "default/pod1", res.pod)
+		}
+		assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.urgentPromotions))
+	}
+}
+
+// The pod an urgent move reserved is the pod the scorer routes to.
+func TestUrgentMoveReservationRoutesScorer(t *testing.T) {
+	a := newTestAgent(urgentConfig(true))
+	sched := newTestEndpoints("pod1", "pod2")
+	seedProgram(t, a, "veteran", sched[0], 300)
+	seedProgram(t, a, "runner", sched[0], 700)
+	forcePause(a, "veteran")
+	primeFitView(a, "pod1", "pod2")
+
+	q := makeQueueWithBytes("veteran", 1, time.Now().Add(-20*time.Second), 300*4)
+	picked, err := a.Pick(context.Background(), bandOf(q))
+	require.NoError(t, err)
+	require.Same(t, q, picked)
+	scores := a.Score(context.Background(), newRequest("veteran", 300*4), sched)
+	assert.Equal(t, 1.0, scores[sched[1]], "the reservation on pod2 overrides the sticky origin")
+	assert.Equal(t, 0.0, scores[sched[0]])
+	require.NoError(t, a.PreRequest(context.Background(), newRequest("veteran", 300*4), schedulingResultFor(sched[1])))
+	_, still := reservationOf(a, "veteran")
+	assert.False(t, still, "binding clears the reservation")
+	assert.False(t, isPaused(a, "veteran"))
+}
+
+// The threshold is inclusive at urgentWaitMs and inert just below it.
+func TestUrgentThresholdBoundary(t *testing.T) {
+	a := newTestAgent(urgentConfig(false))
+	sched := newTestEndpoints("pod1")
+	seedProgram(t, a, "big", sched[0], 400)
+	seedProgram(t, a, "small", sched[0], 100)
+	forcePause(a, "big")
+	forcePause(a, "small")
+	primeFitView(a, "pod1")
+
+	small := makeQueueWithBytes("small", 1, time.Now(), 100*4)
+	big := makeQueueWithBytes("big", 1, time.Now().Add(-14500*time.Millisecond), 400*4)
+	picked, err := a.Pick(context.Background(), bandOf(small, big))
+	require.NoError(t, err)
+	assert.Same(t, small, picked, "14.5 s: below the threshold, size ordering applies")
+
+	big = makeQueueWithBytes("big", 1, time.Now().Add(-15500*time.Millisecond), 400*4)
+	picked, err = a.Pick(context.Background(), bandOf(small, big))
+	require.NoError(t, err)
+	assert.Same(t, big, picked, "15.5 s: urgent")
+}
+
+// The starvation pattern of proposal Part 1, and its remedy: a large paused
+// program whose origin is full keeps losing the free pod to a stream of small
+// newcomers under plain origin-only, cycle after cycle; with the urgent tier
+// it takes the free pod on the first cycle after its wait crosses the
+// threshold.
+func TestUrgentBeatsStreamOfSmallNewcomers(t *testing.T) {
+	for _, tier := range []bool{false, true} {
+		cfg := originOnlyConfig()
+		if tier {
+			cfg.UrgentWaitMs = 15000
+		}
+		a := newTestAgent(cfg)
+		sched := newTestEndpoints("pod1", "pod2")
+		seedProgram(t, a, "big", sched[0], 300)
+		seedProgram(t, a, "runner", sched[0], 700) // pod1 full for big
+		forcePause(a, "big")
+		primeFitView(a, "pod1", "pod2") // pod2 room 900
+
+		bigPicked := false
+		for cycle := 0; cycle < 5 && !bigPicked; cycle++ {
+			big := makeQueueWithBytes("big", 1, time.Now().Add(-20*time.Second), 300*4)
+			small := makeQueueWithBytes(fmt.Sprintf("newcomer-%d", cycle), 1, time.Now(), 50*4)
+			picked, err := a.Pick(context.Background(), bandOf(big, small))
+			require.NoError(t, err)
+			require.NotNil(t, picked, "pod2 has room, something must dispatch")
+			if picked == big {
+				bigPicked = true
+				break
+			}
+			// The newcomer binds to pod2 and finishes, leaving its committed
+			// tokens there; pod2 keeps room for big throughout.
+			id := picked.FlowKey().ID
+			require.NoError(t, a.PreRequest(context.Background(), newRequest(id, 50*4), schedulingResultFor(sched[1])))
+			a.ResponseBody(context.Background(), newRequest(id, 50*4), endOfStream(50, 50), nil)
+			primeFitView(a, "pod1", "pod2")
+		}
+		if tier {
+			assert.True(t, bigPicked, "urgent tier: the waiting program takes the free pod immediately")
+			assert.Equal(t, 1.0, testutil.ToFloat64(a.metrics.urgentPromotions))
+		} else {
+			assert.False(t, bigPicked, "plain origin-only: the origin is full, newcomers take pod2 every cycle")
+		}
+	}
 }
 
 // A paused program outranks a never-admitted one when both fit, regardless of
