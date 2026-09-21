@@ -74,7 +74,7 @@ const holdWaitFloor = time.Second
 // is sized at the larger of its committed tokens and the new turn's estimate
 // (upstream re-estimates before the program waits) and prefers its origin
 // pod when that fits; with resumePlacement origin-only it waits for the
-// origin instead of moving. A fitting program gets a reservation charged to the pod
+// origin instead of moving (until originWaitMaxMs, if set). A fitting program gets a reservation charged to the pod
 // that fit it, released when PreRequest binds the program. A paused or new
 // head waiting past urgentWaitMs is urgent: it outranks every non-urgent
 // paused or new program (oldest first); with urgentMove it may also take any
@@ -175,8 +175,9 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 				preferred = t.programs[id].podName
 			}
 			required := tokens + a.bufferTokensPerProgram
-			// With urgentMove an urgent program is released from the origin-only restriction.
-			waitForOrigin := a.resumeOriginOnly && !(urgent && a.urgentMove)
+			// The origin-only restriction lifts for an urgent program with urgentMove,
+			// and for any paused program that has waited past originWaitMaxMs.
+			waitForOrigin := a.resumeOriginOnly && !(urgent && a.urgentMove) && !(a.originWaitMaxMs > 0 && waitMs >= a.originWaitMaxMs)
 			// A reserved pod is open only to the urgent programs waiting for it.
 			var blocked map[string]bool
 			if len(reserved) > 0 && !(urgent && reserved[preferred]) {
@@ -185,7 +186,7 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 			pod, ok := a.fitPodLocked(required, preferred, pendingByPod, waitForOrigin, blocked)
 			if !ok && !starving {
 				held++
-				if a.resumeOriginOnly && !(urgent && a.urgentMove) && preferred != "" {
+				if waitForOrigin && preferred != "" {
 					// The hold is the policy's doing only if another pod
 					// would have taken the program; record it for the
 					// origin-waits counter at resume time.
