@@ -138,16 +138,13 @@ func TestSessionClass(t *testing.T) {
 	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
 
 	s := m.bindLocked("s1", ep)
-	require.Equal(t, classNew, s.class(), "bound, never dispatched")
+	require.Equal(t, ClassNew, s.class(), "bound, never dispatched")
 	s.turnCount = 1
-	require.Equal(t, classAdmitted, s.class())
+	require.Equal(t, ClassAdmitted, s.class())
 	s.paused = true
-	require.Equal(t, classPaused, s.class())
+	require.Equal(t, ClassPaused, s.class())
 	s.endpoint = nil
-	require.Equal(t, classNew, s.class(), "pod left the pool")
-	require.Equal(t, "new", classNew.String())
-	require.Equal(t, "admitted", classAdmitted.String())
-	require.Equal(t, "paused", classPaused.String())
+	require.Equal(t, ClassNew, s.class(), "pod left the pool")
 }
 
 // The accounting rule: a live reservation counts its reserved size, a paused
@@ -165,32 +162,29 @@ func TestFootprint(t *testing.T) {
 	require.Equal(t, float64(0), s.footprint(t0.Add(reservationTTL)), "an expired one does not")
 }
 
-// Only an admitted session with no turn in flight and no live reservation,
-// idle for at least minIdle, can give up its room.
-func TestReclaimable(t *testing.T) {
+// Only an admitted session with no turn in flight and no live reservation
+// can give up its room; how long it has been idle is the policy's concern.
+func TestPausable(t *testing.T) {
 	idle := func() *session {
 		return &session{committedTokens: 300, turnCount: 1, lastResponseAt: t0}
 	}
-	later := t0.Add(time.Minute)
-	require.True(t, idle().reclaimable(later, time.Minute))
-	require.False(t, idle().reclaimable(later, 2*time.Minute), "inside the lease")
+	require.True(t, idle().pausable(t0))
 
 	s := idle()
 	s.inflightTokens = 100
-	require.False(t, s.reclaimable(later, 0), "turn in flight")
+	require.False(t, s.pausable(t0), "turn in flight")
 	s = idle()
 	s.paused = true
-	require.False(t, s.reclaimable(later, 0), "already paused")
+	require.False(t, s.pausable(t0), "already paused")
 	s = idle()
-	s.reservedUntil = later.Add(time.Second)
-	require.False(t, s.reclaimable(later, 0), "live reservation")
+	s.reservedUntil = t0.Add(time.Second)
+	require.False(t, s.pausable(t0), "live reservation")
 	s = idle()
 	s.turnCount = 0
-	require.False(t, s.reclaimable(later, 0), "never dispatched")
+	require.False(t, s.pausable(t0), "never dispatched")
 }
 
-// A session with a turn queued is never offered for reclaim, and the
-// reclaimable total counts exactly the sessions reclaim may pause.
+// A session with a turn queued is never offered for reclaim.
 func TestIdleSessionsSkipQueued(t *testing.T) {
 	m := newSessionManager(testConfig())
 	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
@@ -198,32 +192,25 @@ func TestIdleSessionsSkipQueued(t *testing.T) {
 		s := m.bindLocked(id, ep)
 		s.committedTokens, s.turnCount, s.lastResponseAt = tokens, 1, t0
 	}
-	later := t0.Add(time.Minute)
 
-	require.Len(t, ep.idleSessions(later, 0, nil), 2)
-	queued := map[string]bool{"s1": true}
-	idle := ep.idleSessions(later, 0, queued)
+	require.Len(t, ep.idleSessions(t0, nil), 2)
+	idle := ep.idleSessions(t0, map[string]bool{"s1": true})
 	require.Len(t, idle, 1)
-	require.Same(t, m.sessions["s2"], idle[0])
-	require.Equal(t, float64(200), ep.reclaimableTokens(later, 0, queued))
+	require.Same(t, m.sessions["s2"], idle["s2"])
 }
 
-// Reclaim pauses the longest-idle sessions first and stops as soon as the
-// room covers the need; with enough room it pauses nobody.
-func TestReclaimLongestIdleFirst(t *testing.T) {
+// Every session dropped from the ledger is reported to forget, so a
+// predictor can drop its state too.
+func TestRemoveCallsForget(t *testing.T) {
 	m := newSessionManager(testConfig())
+	var forgotten []string
+	m.forget = func(id string) { forgotten = append(forgotten, id) }
 	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
-	for id, idleFor := range map[string]time.Duration{"old": 3 * time.Minute, "mid": 2 * time.Minute, "new": time.Minute} {
-		s := m.bindLocked(id, ep)
-		s.committedTokens, s.turnCount = 300, 1
-		s.lastResponseAt = t0.Add(-idleFor)
-	}
+	s := m.bindLocked("s1", ep)
+	s.lastActivity = t0
 
-	require.Equal(t, 0, ep.reclaim(t0, 0, nil, 400, 350))
-	require.Equal(t, 2, ep.reclaim(t0, 0, nil, 100, 650))
-	require.True(t, m.sessions["old"].paused)
-	require.True(t, m.sessions["mid"].paused)
-	require.False(t, m.sessions["new"].paused)
+	m.maintainLocked(t0.Add(2 * m.ttl))
+	require.Equal(t, []string{"s1"}, forgotten)
 }
 
 // A live reservation keeps a never-dispatched session through maintenance;

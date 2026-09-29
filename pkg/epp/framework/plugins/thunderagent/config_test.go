@@ -45,3 +45,13 @@ func TestConfigValidate(t *testing.T) {
 	cfg.IdleLeaseSeconds = 0
 	require.NoError(t, cfg.validate(), "a zero lease reclaims idle sessions at once")
 }
+
+// idleLeaseSeconds only configures the built-in predictor, so setting it
+// next to a nextTurnPredictor reference is rejected.
+func TestConfigLeaseWithPredictor(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.NextTurnPredictor = "gap-ewma"
+	require.NoError(t, cfg.validate())
+	cfg.IdleLeaseSeconds = 10
+	require.Error(t, cfg.validate())
+}

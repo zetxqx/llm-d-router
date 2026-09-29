@@ -60,7 +60,8 @@ type ThunderAgent struct {
 
 	capacityTokens       float64
 	utilThreshold        float64
-	idleLease            time.Duration
+	predictor            NextTurnPredictor
+	policy               AdmissionPolicy
 	headWaitStarvationMs float64
 
 	mgr     *sessionManager
@@ -70,17 +71,28 @@ type ThunderAgent struct {
 // Factory builds a ThunderAgent from raw plugin parameters and registers its
 // metrics.
 func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
-	cfg := defaultConfig()
-	if rawParameters != nil {
-		if err := rawParameters.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin: %w", ThunderAgentPluginType, err)
-		}
+	rawCfg, err := ConfigParser(rawParameters, handle)
+	if err != nil {
+		return nil, err
 	}
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("invalid parameters of the '%s' plugin: %w", ThunderAgentPluginType, err)
-	}
+	cfg := rawCfg.(Config)
 
 	a := newThunderAgent(name, cfg)
+	if cfg.NextTurnPredictor != "" || cfg.AdmissionPolicy != "" {
+		if handle == nil {
+			return nil, fmt.Errorf("the '%s' plugin needs a plugin handle to resolve its policy references", ThunderAgentPluginType)
+		}
+		if cfg.NextTurnPredictor != "" {
+			if a.predictor, err = fwkplugin.PluginByType[NextTurnPredictor](handle, cfg.NextTurnPredictor); err != nil {
+				return nil, fmt.Errorf("nextTurnPredictor of the '%s' plugin: %w", ThunderAgentPluginType, err)
+			}
+		}
+		if cfg.AdmissionPolicy != "" {
+			if a.policy, err = fwkplugin.PluginByType[AdmissionPolicy](handle, cfg.AdmissionPolicy); err != nil {
+				return nil, fmt.Errorf("admissionPolicy of the '%s' plugin: %w", ThunderAgentPluginType, err)
+			}
+		}
+	}
 	if handle != nil {
 		if reg := handle.Metrics(); reg != nil {
 			if err := a.metrics.register(reg); err != nil {
@@ -91,17 +103,38 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 	return a, nil
 }
 
+// ConfigParser decodes and validates the plugin parameters. It is registered
+// with the plugin so the loader instantiates the referenced policy plugins
+// first.
+func ConfigParser(rawParameters *json.Decoder, _ fwkplugin.Handle) (any, error) {
+	cfg := defaultConfig()
+	if rawParameters != nil {
+		if err := rawParameters.Decode(&cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse the parameters of the '%s' plugin: %w", ThunderAgentPluginType, err)
+		}
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("invalid parameters of the '%s' plugin: %w", ThunderAgentPluginType, err)
+	}
+	return cfg, nil
+}
+
+// newThunderAgent builds the plugin with the built-in lease predictor and
+// default policy; Factory swaps in referenced ones.
 func newThunderAgent(name string, cfg Config) *ThunderAgent {
 	mgr := newSessionManager(cfg)
-	return &ThunderAgent{
+	a := &ThunderAgent{
 		typedName:            fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
 		capacityTokens:       float64(cfg.CapacityTokens),
 		utilThreshold:        cfg.UtilThreshold,
-		idleLease:            time.Duration(cfg.IdleLeaseSeconds * float64(time.Second)),
 		headWaitStarvationMs: cfg.HeadWaitStarvationMs,
+		predictor:            &leasePredictor{lease: time.Duration(cfg.IdleLeaseSeconds * float64(time.Second))},
+		policy:               defaultPolicy{},
 		mgr:                  mgr,
 		metrics:              newThunderMetrics(mgr),
 	}
+	mgr.forget = func(id string) { a.predictor.Forget(id) }
+	return a
 }
 
 func (a *ThunderAgent) TypedName() fwkplugin.TypedName {

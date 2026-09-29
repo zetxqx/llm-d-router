@@ -47,6 +47,11 @@ func (a *ThunderAgent) PreRequest(_ context.Context, request *fwksched.Inference
 	m.mu.Lock()
 	m.maintainLocked(now)
 	s := m.bindLocked(id, m.ensureEndpointLocked(md.ID.String(), capacity, now))
+	var gap time.Duration
+	if !s.lastResponseAt.IsZero() {
+		gap = now.Sub(s.lastResponseAt)
+	}
+	a.predictor.ObserveTurn(id, gap, request)
 	resumed := s.paused
 	s.paused = false
 	s.reservedUntil = time.Time{}

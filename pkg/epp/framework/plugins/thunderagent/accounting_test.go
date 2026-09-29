@@ -114,3 +114,21 @@ func TestAnonymousIgnored(t *testing.T) {
 	a.mgr.mu.Unlock()
 	require.Equal(t, 0, n)
 }
+
+// PreRequest reports each dispatched turn to the predictor with the idle gap
+// since the session's previous response: zero on its first turn.
+func TestPreRequestReportsGapToPredictor(t *testing.T) {
+	a := newTestAgent(testConfig())
+	pred := newFakePredictor()
+	a.predictor = pred
+	ep := schedEndpoint("pod-a", 0, 0)
+
+	runTurn(t, a, "s1", ep, 400, 300)
+	idleFor(a, "s1", 5*time.Second)
+	_ = startTurn(t, a, "s1", ep, 800)
+
+	require.Len(t, pred.observed["s1"], 2)
+	require.Equal(t, time.Duration(0), pred.observed["s1"][0])
+	require.GreaterOrEqual(t, pred.observed["s1"][1], 5*time.Second)
+	require.Less(t, pred.observed["s1"][1], 6*time.Second)
+}

@@ -40,6 +40,12 @@ type Config struct {
 	// HeadWaitStarvationMs is the maximum queue wait: a request waiting
 	// this long is admitted even when no pod has room. 0 disables it.
 	HeadWaitStarvationMs float64 `json:"headWaitStarvationMs"`
+	// NextTurnPredictor names a plugin implementing NextTurnPredictor. Empty
+	// uses the built-in lease predictor with IdleLeaseSeconds.
+	NextTurnPredictor string `json:"nextTurnPredictor" pluginRef:""`
+	// AdmissionPolicy names a plugin implementing AdmissionPolicy. Empty uses
+	// the built-in policy.
+	AdmissionPolicy string `json:"admissionPolicy" pluginRef:""`
 }
 
 func defaultConfig() Config {
@@ -67,6 +73,9 @@ func (c Config) validate() error {
 	}
 	if c.HeadWaitStarvationMs < 0 {
 		return fmt.Errorf("headWaitStarvationMs must be >= 0, got %v", c.HeadWaitStarvationMs)
+	}
+	if c.NextTurnPredictor != "" && c.IdleLeaseSeconds != defaultConfig().IdleLeaseSeconds {
+		return fmt.Errorf("idleLeaseSeconds applies only to the built-in lease predictor, but nextTurnPredictor is %q", c.NextTurnPredictor)
 	}
 	if c.EvictionTTLSeconds*1000 <= c.HeadWaitStarvationMs {
 		return fmt.Errorf("evictionTtlSeconds (%v s) must exceed headWaitStarvationMs (%v ms), or a held session is evicted mid-wait and re-enters as new", c.EvictionTTLSeconds, c.HeadWaitStarvationMs)

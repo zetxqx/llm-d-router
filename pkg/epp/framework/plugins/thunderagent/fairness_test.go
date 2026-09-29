@@ -18,6 +18,7 @@ package thunderagent
 
 import (
 	"context"
+	"sort"
 	"testing"
 	"time"
 
@@ -247,4 +248,66 @@ func TestFailsOpenWithoutFitView(t *testing.T) {
 	a := newTestAgent(testConfig())
 	q := makeQueue("s1", time.Now(), 4000000)
 	require.Equal(t, q, pick(t, a, q))
+}
+
+// The gate pauses the victims the policy offers, in its order: a policy that
+// pauses the smallest idle session first, lease or not, frees s2 where the
+// built-in one would pause the longest idle s1.
+func TestGateFollowsPolicyVictims(t *testing.T) {
+	a := newTestAgent(testConfig())
+	a.policy = &fakePolicy{victims: func(_ SessionClass, idle []SessionInfo) []SessionInfo {
+		v := append([]SessionInfo(nil), idle...)
+		sort.Slice(v, func(i, j int) bool { return v[i].Tokens < v[j].Tokens })
+		return v
+	}}
+	seed(t, a, "s1", "pod-a", 300)
+	seed(t, a, "s2", "pod-a", 200)
+	seed(t, a, "s3", "pod-a", 400) // room 100
+	idleFor(a, "s1", 2*time.Minute)
+	idleFor(a, "s2", time.Minute)
+	primeFitView(a, dlEndpoint("pod-a", 0, 0))
+
+	q := makeQueue("s4", time.Now(), 1000) // estimate 250
+	require.Equal(t, q, pick(t, a, q))
+	require.True(t, isPaused(a, "s2"))
+	require.False(t, isPaused(a, "s1"))
+	require.False(t, isPaused(a, "s3"))
+}
+
+// A victim that is not one of the pod's idle sessions is neither counted as
+// room nor paused, whatever the policy returns.
+func TestGateSkipsVictimsTheMechanismForbids(t *testing.T) {
+	a := newTestAgent(testConfig())
+	a.policy = &fakePolicy{victims: func(_ SessionClass, idle []SessionInfo) []SessionInfo {
+		return append([]SessionInfo{{ID: "s1", Tokens: 900}, {ID: "ghost", Tokens: 900}}, idle...)
+	}}
+	_ = startTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 2400) // 600 in flight
+	seed(t, a, "s2", "pod-a", 300)                                // room 100
+	primeFitView(a, dlEndpoint("pod-a", 0, 0))
+
+	big := makeQueue("s3", time.Now(), 2000) // estimate 500 > room 100 + s2 300
+	require.Nil(t, pick(t, a, big))
+	q := makeQueue("s4", time.Now(), 1200) // estimate 300: s2's room covers it
+	require.Equal(t, q, pick(t, a, q))
+	require.False(t, isPaused(a, "s1"), "turn in flight")
+	require.True(t, isPaused(a, "s2"))
+}
+
+// The gate admits in the policy's order, except that a head past the
+// starvation deadline goes first whatever the policy says.
+func TestGateFollowsPolicyOrder(t *testing.T) {
+	cfg := testConfig()
+	cfg.HeadWaitStarvationMs = 60000
+	a := newTestAgent(cfg)
+	a.policy = &fakePolicy{less: func(x, y *Candidate) bool { return x.Class > y.Class }} // new before paused
+	seed(t, a, "s1", "pod-a", 100)
+	pause(a, "s1")
+	primeFitView(a, dlEndpoint("pod-a", 0, 0))
+
+	paused := makeQueue("s1", time.Now(), 400)
+	fresh := makeQueue("s2", time.Now(), 400)
+	require.Equal(t, fresh, pick(t, a, paused, fresh))
+
+	starving := makeQueue("s3", time.Now().Add(-2*time.Minute), 400)
+	require.Equal(t, starving, pick(t, a, paused, fresh, starving))
 }

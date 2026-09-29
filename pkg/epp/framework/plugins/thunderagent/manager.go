@@ -17,7 +17,6 @@ limitations under the License.
 package thunderagent
 
 import (
-	"sort"
 	"sync"
 	"time"
 )
@@ -38,35 +37,6 @@ const endpointStaleAfter = 5 * time.Second
 // PreRequest, such as a request cancelled between dispatch and binding.
 // Counting a cancelled request as occupancy would be phantom load.
 const reservationTTL = 5 * time.Second
-
-// sessionClass ranks a waiting session for admission. Lower dispatches
-// first.
-type sessionClass int
-
-const (
-	// classAdmitted is a session already admitted to a pod: bound to it,
-	// at least one turn dispatched, not paused. Its footprint is already
-	// counted and finishing its trajectory is what frees capacity, so its
-	// turns always dispatch.
-	classAdmitted sessionClass = iota
-	// classPaused gave its room to another session's turn: its next turn
-	// must fit its own pod again, but it outranks never-admitted sessions.
-	classPaused
-	// classNew is not admitted to any pod: it never dispatched, or its pod
-	// left the pool. Admitted only when a pod has room.
-	classNew
-)
-
-func (c sessionClass) String() string {
-	switch c {
-	case classAdmitted:
-		return "admitted"
-	case classPaused:
-		return "paused"
-	default:
-		return "new"
-	}
-}
 
 // session is one agent trajectory, identified by the request FairnessID.
 // All fields are guarded by sessionManager.mu.
@@ -103,14 +73,14 @@ func (s *session) size() float64 {
 
 // class ranks the session for admission. The order of the checks matters: a
 // session whose pod left the pool re-enters as new even if it was paused.
-func (s *session) class() sessionClass {
+func (s *session) class() SessionClass {
 	if s.endpoint == nil || s.turnCount == 0 {
-		return classNew
+		return ClassNew
 	}
 	if s.paused {
-		return classPaused
+		return ClassPaused
 	}
-	return classAdmitted
+	return ClassAdmitted
 }
 
 // footprint is the accounting rule: an unexpired reservation counts its
@@ -126,12 +96,11 @@ func (s *session) footprint(now time.Time) float64 {
 	return s.size()
 }
 
-// reclaimable reports whether the session's room can be taken for another
-// turn: it is admitted and counted in full, has no turn in flight, and has
-// been idle for at least minIdle since its last response.
-func (s *session) reclaimable(now time.Time, minIdle time.Duration) bool {
-	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens == 0 &&
-		now.Sub(s.lastResponseAt) >= minIdle
+// pausable reports whether the session can give up its room at all: it is
+// admitted and counted in full, with no turn in flight and no live
+// reservation. Whether it should is the AdmissionPolicy's decision.
+func (s *session) pausable(now time.Time) bool {
+	return s.turnCount > 0 && !s.paused && !now.Before(s.reservedUntil) && s.inflightTokens == 0
 }
 
 // endpointState is the plugin's own record of one endpoint.
@@ -153,46 +122,17 @@ func (p *endpointState) occupancy(now time.Time) float64 {
 	return total
 }
 
-// idleSessions returns the endpoint's sessions whose room can be reclaimed.
-// Sessions with a turn queued are skipped: they are about to be active.
-func (p *endpointState) idleSessions(now time.Time, minIdle time.Duration, queued map[string]bool) []*session {
-	var idle []*session
+// idleSessions returns the endpoint's sessions that can give up their room,
+// by id. Sessions with a turn queued are skipped: they are about to be
+// active.
+func (p *endpointState) idleSessions(now time.Time, queued map[string]bool) map[string]*session {
+	idle := make(map[string]*session)
 	for id, s := range p.sessions {
-		if s.reclaimable(now, minIdle) && !queued[id] {
-			idle = append(idle, s)
+		if s.pausable(now) && !queued[id] {
+			idle[id] = s
 		}
 	}
 	return idle
-}
-
-// reclaimableTokens sums the footprints reclaim could free with the same
-// arguments.
-func (p *endpointState) reclaimableTokens(now time.Time, minIdle time.Duration, queued map[string]bool) float64 {
-	var total float64
-	for _, s := range p.idleSessions(now, minIdle, queued) {
-		total += s.size()
-	}
-	return total
-}
-
-// reclaim pauses the endpoint's reclaimable sessions, longest idle first,
-// until room covers need, and returns how many it paused.
-func (p *endpointState) reclaim(now time.Time, minIdle time.Duration, queued map[string]bool, room, need float64) int {
-	if room >= need {
-		return 0
-	}
-	idle := p.idleSessions(now, minIdle, queued)
-	sort.Slice(idle, func(i, j int) bool { return idle[i].lastResponseAt.Before(idle[j].lastResponseAt) })
-	paused := 0
-	for _, s := range idle {
-		if room >= need {
-			break
-		}
-		s.paused = true
-		room += s.size()
-		paused++
-	}
-	return paused
 }
 
 // sessionManager is the ledger shared by all of the thunder agent plugin's hooks/
@@ -206,6 +146,8 @@ type sessionManager struct {
 
 	ttl             time.Duration
 	lastMaintenance time.Time
+	// forget, when set, is told of every session dropped from the ledger.
+	forget func(id string)
 }
 
 func newSessionManager(cfg Config) *sessionManager {
@@ -258,6 +200,9 @@ func (m *sessionManager) removeLocked(id string) {
 		delete(s.endpoint.sessions, id)
 	}
 	delete(m.sessions, id)
+	if m.forget != nil {
+		m.forget(id)
+	}
 }
 
 // estimateTokens converts a request body size to a token estimate.

@@ -27,6 +27,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -190,4 +191,52 @@ func pick(t *testing.T, a *ThunderAgent, queues ...fwkfc.FlowQueueAccessor) fwkf
 	got, err := a.Pick(context.Background(), bandOf(queues...))
 	require.NoError(t, err)
 	return got
+}
+
+// fakePredictor records the turns and evictions it is told of and predicts
+// next[id] for a session (0 when unset).
+type fakePredictor struct {
+	observed  map[string][]time.Duration
+	forgotten []string
+	next      map[string]time.Duration
+}
+
+func newFakePredictor() *fakePredictor {
+	return &fakePredictor{observed: map[string][]time.Duration{}, next: map[string]time.Duration{}}
+}
+
+func (p *fakePredictor) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "fake-predictor", Name: "fake"}
+}
+
+func (p *fakePredictor) ObserveTurn(id string, gap time.Duration, _ *fwksched.InferenceRequest) {
+	p.observed[id] = append(p.observed[id], gap)
+}
+
+func (p *fakePredictor) Forget(id string) { p.forgotten = append(p.forgotten, id) }
+
+func (p *fakePredictor) NextTurnIn(id string, _ time.Duration) time.Duration { return p.next[id] }
+
+// fakePolicy delegates to the built-in policy unless a function is set.
+type fakePolicy struct {
+	less    func(a, b *Candidate) bool
+	victims func(forClass SessionClass, idle []SessionInfo) []SessionInfo
+}
+
+func (p *fakePolicy) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "fake-policy", Name: "fake"}
+}
+
+func (p *fakePolicy) Less(a, b *Candidate) bool {
+	if p.less != nil {
+		return p.less(a, b)
+	}
+	return defaultPolicy{}.Less(a, b)
+}
+
+func (p *fakePolicy) Victims(forClass SessionClass, idle []SessionInfo) []SessionInfo {
+	if p.victims != nil {
+		return p.victims(forClass, idle)
+	}
+	return defaultPolicy{}.Victims(forClass, idle)
 }

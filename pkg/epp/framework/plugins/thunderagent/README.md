@@ -63,9 +63,36 @@ parameters:
 |---|---|---|
 | `capacityTokens` | `4194304` | Per-pod KV capacity in tokens when `cache_config_info` is not scraped. |
 | `utilThreshold` | `1.0` | Fit ceiling as a fraction of capacity (1.0 = 100%). |
-| `idleLeaseSeconds` | `30` | How long an idle session keeps its room against paused and new sessions. Set it to about a typical tool-call duration: shorter pauses sessions about to return, longer holds admissions behind long tool calls. |
+| `idleLeaseSeconds` | `30` | How long an idle session keeps its room against paused and new sessions, for the built-in lease predictor. Set it to about a typical tool-call duration: shorter pauses sessions about to return, longer holds admissions behind long tool calls. Rejected together with `nextTurnPredictor`. |
 | `headWaitStarvationMs` | `1800000` | Forced-admission backstop; 0 disables it. |
 | `evictionTtlSeconds` | `3600` | Idle session state retention; must exceed `headWaitStarvationMs`. |
+| `nextTurnPredictor` | built-in lease predictor | Name of a plugin implementing `NextTurnPredictor`. |
+| `admissionPolicy` | built-in policy | Name of a plugin implementing `AdmissionPolicy`. |
+
+## Pluggable policies
+
+The gate's two decisions are interfaces (`policy.go`), implemented by plugins
+that `thunder-agent` references by name:
+
+- `NextTurnPredictor` predicts when an idle session's next turn arrives. It
+  observes every dispatched turn with the idle gap before it and is told of
+  every session dropped from the ledger. The built-in predictor expects a
+  session back any moment for `idleLeaseSeconds` after its last response,
+  and not soon after that.
+- `AdmissionPolicy` orders the waiting sessions that fit, and names, in
+  pause order, the idle sessions on a pod that may give up their room for a
+  given class. The built-in policy orders by class, then the smaller
+  footprint, then the older head; a paused or new session may take the room
+  of sessions not expected back right away, an admitted session's turn any
+  idle session's, those predicted back latest first, then the longest idle.
+
+The mechanism is not pluggable: the ledger and its accounting rule,
+reservations, which sessions can be paused at all (no turn in flight or
+queued, no live reservation), admitted sessions' turns always dispatching,
+strict origin affinity and the starvation backstop. The gate counts and
+pauses only the pod's idle sessions, at the ledger's sizes, whatever a policy
+returns. Policies are called under the ledger lock, from Pick about once per
+millisecond while requests wait, so they must be fast.
 
 ## Observability
 
