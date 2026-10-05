@@ -313,8 +313,13 @@ func (p *dataProducer) PreRequest(ctx context.Context, request *fwksched.Inferen
 
 func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 	gpuBlocks := defaultLRUCapacityPerServer
-	if p.config.AutoTune && targetEndpoint.GetMetrics() != nil && targetEndpoint.GetMetrics().CacheNumBlocks > 0 {
-		gpuBlocks = targetEndpoint.GetMetrics().CacheNumBlocks
+	if m := targetEndpoint.GetMetrics(); p.config.AutoTune && m != nil && m.CacheNumBlocks > 0 {
+		gpuBlocks = m.CacheNumBlocks
+		// CacheNumBlocks counts engine blocks; convert to router blocks when
+		// GetBlockSize clamps the router block size above CacheBlockSize.
+		if routerBlockSize := p.GetBlockSize([]fwksched.Endpoint{targetEndpoint}); m.CacheBlockSize > 0 && routerBlockSize > 0 {
+			gpuBlocks = max(1, m.CacheNumBlocks*m.CacheBlockSize/routerBlockSize)
+		}
 	} else if p.config.LRUCapacityPerServer > 0 {
 		gpuBlocks = p.config.LRUCapacityPerServer
 	}
