@@ -393,6 +393,104 @@ func TestPrefixPluginAutoTune(t *testing.T) {
 	assert.Contains(t, p.indexer().Pods(), ServerID(endpoint.GetMetadata().ID))
 }
 
+// TestPrefixPluginAutoTuneCapacityMatchesEngineTokens checks that an
+// autotuned LRU holds no more tokens than the engine reports. CacheNumBlocks
+// counts engine blocks, while each LRU entry is one router block, which the
+// minBlockSizeTokens floor can make larger than an engine block.
+func TestPrefixPluginAutoTuneCapacityMatchesEngineTokens(t *testing.T) {
+	tests := []struct {
+		name                string
+		engineBlockSize     int
+		engineNumBlocks     int
+		wantRouterBlockSize int
+		wantMaxRouterBlocks int
+	}{
+		{
+			name:                "engine block size 16 (below floor)",
+			engineBlockSize:     16,
+			engineNumBlocks:     8, // 128 tokens of KV cache on the engine
+			wantRouterBlockSize: minBlockSizeTokens,
+			wantMaxRouterBlocks: 2,
+		},
+		{
+			name:                "engine block size 64 (at floor)",
+			engineBlockSize:     64,
+			engineNumBlocks:     2,
+			wantRouterBlockSize: 64,
+			wantMaxRouterBlocks: 2,
+		},
+		{
+			name:                "engine block size 128 (above floor)",
+			engineBlockSize:     128,
+			engineNumBlocks:     2,
+			wantRouterBlockSize: 128,
+			wantMaxRouterBlocks: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoint := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod-capacity"}},
+				&fwkdl.Metrics{
+					CacheBlockSize: tc.engineBlockSize,
+					CacheNumBlocks: tc.engineNumBlocks,
+				}, fwkdl.NewAttributes())
+			endpoints := []fwksched.Endpoint{endpoint}
+
+			cfg := config{
+				AutoTune:               true,
+				BlockSizeTokens:        defaultBlockSizeTokens,
+				MaxPrefixTokensToMatch: defaultMaxPrefixTokens,
+				LRUCapacityPerServer:   defaultLRUCapacityPerServer,
+			}
+			p, err := newDataProducer(context.Background(), ApproxPrefixCachePluginType, cfg, testHandle())
+			assert.NoError(t, err)
+
+			routerBlockSize := p.GetBlockSize(endpoints)
+			assert.Equal(t, tc.wantRouterBlockSize, routerBlockSize)
+
+			engineTokens := tc.engineBlockSize * tc.engineNumBlocks
+			maxRouterBlocks := engineTokens / routerBlockSize
+			assert.Equal(t, tc.wantMaxRouterBlocks, maxRouterBlocks)
+
+			// Each prompt is one router block with distinct tokens.
+			prompt := func(n int) []uint32 {
+				ids := make([]uint32, routerBlockSize)
+				for i := range ids {
+					ids[i] = uint32(n*routerBlockSize + i + 1) //nolint:gosec // G115: small test values, no overflow
+				}
+				return ids
+			}
+			schedulingResult := &fwksched.SchedulingResult{
+				PrimaryProfileName: "default",
+				ProfileResults: map[string]*fwksched.ProfileRunResult{
+					"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
+				},
+			}
+			const numPrompts = 5
+			for n := range numPrompts {
+				req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "test-model", Body: tokenizedBody(prompt(n))}
+				_ = p.Produce(context.Background(), req, endpoints)
+				_ = p.PreRequest(context.Background(), req, schedulingResult)
+				p.wg.Wait()
+			}
+
+			podID := ServerID(endpoint.GetMetadata().ID)
+			assert.LessOrEqual(t, p.indexer().PodBlockCounts()[podID], maxRouterBlocks,
+				"LRU must not hold more tokens than the engine's %d-token KV cache", engineTokens)
+
+			// The engine can hold only the most recent prompts, so the first one must
+			// no longer be reported as cached.
+			req := &fwksched.InferenceRequest{RequestID: uuid.NewString(), TargetModel: "test-model", Body: tokenizedBody(prompt(0))}
+			_ = p.Produce(context.Background(), req, endpoints)
+			key := attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName(ApproxPrefixCachePluginType)
+			info, _ := endpoint.Get(key)
+			assert.Equal(t, 0, info.(*attrprefix.PrefixCacheMatchInfo).MatchBlocks(),
+				"the oldest prompt exceeds the engine's capacity and should have been evicted")
+		})
+	}
+}
+
 func TestMaxPrefixTokensToMatch(t *testing.T) {
 	disableMinBlockSizeClamp(t)
 	// BlockSizeTokens=1, MaxPrefixTokensToMatch=2 -> maxBlocks = 2/1 = 2.
