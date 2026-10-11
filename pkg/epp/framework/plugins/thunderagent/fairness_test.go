@@ -255,6 +255,50 @@ func TestStarvationForcesAdmission(t *testing.T) {
 	require.Equal(t, q, pick(t, a, q))
 }
 
+// A paused session force-admitted past the deadline, too large to fit even
+// after reclaim, first takes the room of its pod's idle sessions past the
+// lease, so the pod overflows its ceiling by as little as possible.
+func TestStarvingPausedSessionReclaimsIdle(t *testing.T) {
+	cfg := testConfig()
+	cfg.HeadWaitStarvationMs = 1000
+	a := newTestAgent(cfg)
+	seed(t, a, "s1", "pod-a", 600)
+	seed(t, a, "s3", "pod-a", 400) // within the lease
+	seed(t, a, "s2", "pod-a", 700)
+	pause(a, "s2")
+	idleFor(a, "s1", time.Minute)
+	primeFitView(a, dlEndpoint("pod-a"))
+
+	// s2 needs 700; room 0 plus s1's reclaimable 600 is not enough.
+	q := makeQueue("s2", time.Now().Add(-2*time.Second), 2000)
+	require.Equal(t, q, pick(t, a, q))
+	require.True(t, isPaused(a, "s1"))
+	require.False(t, isPaused(a, "s3"))
+	// s3 plus the 700 reserved for s2.
+	require.Equal(t, float64(1100), endpointTokens(a, "default/pod-a"))
+}
+
+// A new session force-admitted past the deadline that fits no pod goes to
+// the pod with the most room once idle sessions give up theirs, and takes
+// the room of that pod's idle sessions past the lease.
+func TestStarvingNewSessionReclaimsIdle(t *testing.T) {
+	cfg := testConfig()
+	cfg.HeadWaitStarvationMs = 1000
+	a := newTestAgent(cfg)
+	seed(t, a, "s1", "pod-a", 600)
+	seed(t, a, "s3", "pod-a", 400)  // within the lease
+	seed(t, a, "s4", "pod-b", 1000) // within the lease
+	idleFor(a, "s1", time.Minute)
+	primeFitView(a, dlEndpoint("pod-a"), dlEndpoint("pod-b"))
+
+	q := makeQueue("s9", time.Now().Add(-2*time.Second), 8000) // estimate 2000
+	require.Equal(t, q, pick(t, a, q))
+	require.True(t, isPaused(a, "s1"))
+	s9, ok := sessionOf(a, "s9")
+	require.True(t, ok)
+	require.Equal(t, "default/pod-a", s9.endpoint.id)
+}
+
 // Without a fit view (the plugin not wired as the saturation detector) the
 // gate fails open and only class ordering remains.
 func TestFailsOpenWithoutFitView(t *testing.T) {
