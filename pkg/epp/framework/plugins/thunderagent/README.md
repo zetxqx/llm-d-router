@@ -55,8 +55,10 @@ and holds until one fits it.
 Among the sessions that fit, admitted goes before paused before new; a
 session that fits no pod does not block the others, so smaller sessions can
 take room a larger paused one waits for. Any head waiting past
-`headWaitStarvationMs` is force-admitted. A picked session's room is
-reserved until its request reaches the pod.
+`headWaitStarvationMs` is force-admitted; one that fits no pod goes to its
+own pod (paused) or the pod with the most room (new), after that pod's
+sessions idle past `idleLeaseSeconds` give up their room. A picked session's
+room is reserved until its request reaches the pod.
 
 Idle sessions give up their room on demand, when a session is picked,
 longest idle first. A paused or new session that does not fit, and an

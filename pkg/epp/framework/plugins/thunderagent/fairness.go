@@ -73,8 +73,12 @@ type candidate struct {
 // Room is capacity * utilThreshold minus the working set. When the picked
 // session does not fit, or an admitted session's turn pushes its pod over the
 // ceiling, sessions idle past idleLeaseSeconds give up their room, longest
-// idle first, and are paused. Sessions with a turn queued are never paused,
-// and nothing is paused until a session is picked.
+// idle first, and are paused. A session force-admitted past
+// headWaitStarvationMs that fits no pod goes to its own pod (paused) or the
+// pod with the most room (new), whose idle sessions give up their room the
+// same way, so the pod overflows its ceiling by as little as they allow.
+// Sessions with a turn queued are never paused, and nothing is paused until a
+// session is picked.
 func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor) (fwkfc.FlowQueueAccessor, error) {
 	if band == nil {
 		return nil, nil //nolint:nilnil
@@ -177,7 +181,8 @@ func (a *ThunderAgent) roomLocked(p *endpointState, now time.Time) float64 {
 
 // sizeAndFitLocked classifies and sizes a candidate and, for a paused or new
 // session, finds the pod it fits once reclaimable idle sessions give up
-// their room. Returns false when the candidate must hold.
+// their room, or for a starving one that fits no pod, the pod it is forced
+// onto. Returns false when the candidate must hold.
 func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpointState]float64) bool {
 	s := a.mgr.sessions[c.id]
 	var committed, inflight float64
@@ -209,7 +214,26 @@ func (a *ThunderAgent) sizeAndFitLocked(c *candidate, rooms, spare map[*endpoint
 	case classNew:
 		c.fitPod = a.newSessionPod(c.tokens, rooms, spare)
 	}
+	if c.fitPod == nil && c.starving {
+		c.fitPod = a.starvingPod(c.class, s, rooms, spare)
+	}
 	return c.fitPod != nil || c.starving
+}
+
+// starvingPod is the pod a starving session that fits no pod is forced onto:
+// a paused session's own pod, else the pod with the most room once
+// reclaimable idle sessions give up theirs. Nil when the ledger has no pod.
+func (a *ThunderAgent) starvingPod(class sessionClass, s *session, rooms, spare map[*endpointState]float64) *endpointState {
+	if class == classPaused {
+		return s.endpoint
+	}
+	var best *endpointState
+	for p, room := range rooms {
+		if best == nil || room+spare[p] > rooms[best]+spare[best] {
+			best = p
+		}
+	}
+	return best
 }
 
 // fitTokens is the room a session needs on a pod: its size, capped at the
@@ -255,8 +279,8 @@ func (a *ThunderAgent) admitLocked(best *candidate, now time.Time, queued map[st
 		paused = m.reclaimLocked(best.fitPod, now, queued, a.roomLocked(best.fitPod, now), a.fitTokens(best.fitPod, best.tokens))
 		s = m.bindLocked(best.id, best.fitPod)
 	case s == nil:
-		// A force-admitted new session that fits no pod: the scheduler
-		// places it and PreRequest binds it.
+		// A force-admitted new session with no pod in the ledger: the
+		// scheduler places it and PreRequest binds it.
 		return 0
 	}
 	s.reservedTokens = best.tokens
