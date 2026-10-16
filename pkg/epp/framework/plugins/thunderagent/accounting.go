@@ -26,6 +26,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 // PreRequest adds the request's estimated prompt tokens to its session's
@@ -43,7 +44,10 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 		return nil
 	}
 	md := endpoint.GetMetadata()
-	if md == nil {
+	// Under disaggregation the primary profile picks the decode pod. A
+	// configuration whose primary profile picks a pod that does not decode
+	// leaves the session untracked rather than bound to that pod.
+	if md == nil || !bylabel.RunsDecode(md.Labels) {
 		return nil
 	}
 	capacity := a.endpointCapacity(endpoint.GetMetrics())
