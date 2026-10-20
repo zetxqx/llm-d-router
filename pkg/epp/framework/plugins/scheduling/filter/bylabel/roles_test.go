@@ -76,6 +76,26 @@ func TestRoleFilterDecodeRole(t *testing.T) {
 	}, names)
 }
 
+// RunsDecode selects the same endpoints as the decode filter.
+func TestRunsDecodeMatchesDecodeRole(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	for _, labels := range []map[string]string{
+		{RoleLabel: RoleDecode},
+		{RoleLabel: RolePrefill},
+		{RoleLabel: RolePrefillDecode},
+		{RoleLabel: RoleEncodePrefillDecode},
+		{RoleLabel: RoleEncode},
+		{RoleLabel: RoleEncodePrefill},
+		{"app": "vllm"},
+		{},
+		nil,
+	} {
+		endpoint := createEndpoint(k8stypes.NamespacedName{Name: "pod"}, "10.0.0.1", labels)
+		kept := len(NewDecodeRole().Filter(ctx, nil, []scheduling.Endpoint{endpoint})) == 1
+		assert.Equal(t, kept, RunsDecode(labels), "labels %v", labels)
+	}
+}
+
 func TestRoleFilterPrefillRole(t *testing.T) {
 	endpoints := []scheduling.Endpoint{
 		createEndpoint(k8stypes.NamespacedName{Name: "decode-pod"}, "10.0.0.1",

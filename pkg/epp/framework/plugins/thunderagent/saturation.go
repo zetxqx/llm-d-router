@@ -20,9 +20,6 @@ import (
 	"context"
 	"time"
 
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
@@ -38,23 +35,20 @@ import (
 // admitted session's turn can be told apart from a new one. This hook is
 // used because it is the only flow-control callback that receives the
 // endpoint list each dispatch cycle.
-func (a *ThunderAgent) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
+func (a *ThunderAgent) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
 	now := time.Now()
 	m := a.mgr
 
-	var prefillPods []string
 	m.mu.Lock()
 	for _, endpoint := range endpoints {
 		md := endpoint.GetMetadata()
-		if md == nil {
+		// Only pods that decode enter the ledger. Under prefill/decode
+		// disaggregation a session's KV stays on its decode pod between turns;
+		// a prefill pod holds it only while it prefills a turn.
+		if md == nil || !bylabel.RunsDecode(md.Labels) {
 			continue
 		}
-		id := md.ID.String()
-		_, known := m.endpoints[id]
-		m.ensureEndpointLocked(id, a.endpointCapacity(endpoint.GetMetrics()), now)
-		if role := md.Labels[bylabel.RoleLabel]; !known && (role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill) {
-			prefillPods = append(prefillPods, id)
-		}
+		m.ensureEndpointLocked(md.ID.String(), a.endpointCapacity(endpoint.GetMetrics()), now)
 	}
 	// A pod the endpoint list has stopped reporting is gone: unbind its
 	// sessions so their next turn re-enters as new, and drop the entry.
@@ -70,8 +64,5 @@ func (a *ThunderAgent) Saturation(ctx context.Context, endpoints []datalayer.End
 		delete(m.endpoints, id)
 	}
 	m.mu.Unlock()
-	for _, id := range prefillPods {
-		log.FromContext(ctx).V(logutil.DEFAULT).Info("thunder-agent does not support prefill/decode disaggregation: prefill pods enter its session manager", "pod", id)
-	}
 	return 0.0
 }
