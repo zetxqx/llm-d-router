@@ -46,16 +46,24 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 	if md == nil {
 		return nil
 	}
+	if a.closeSession && isSGLangEndpoint(md) {
+		injectSessionID(request.Body, id)
+	}
 	capacity := a.endpointCapacity(endpoint.GetMetrics())
+	addr := a.closeAddr(md)
 
 	now := time.Now()
 	m := a.mgr
 	m.mu.Lock()
 	movedFrom := ""
-	if prev, ok := m.sessions[id]; ok && prev.class() == classAdmitted && prev.endpoint.id != md.ID.String() {
+	var closeMoved closeJob
+	if prev, ok := m.sessions[id]; ok && prev.turnCount > 0 && !prev.paused && prev.endpoint != nil && prev.endpoint.id != md.ID.String() {
 		movedFrom = prev.endpoint.id
+		if prev.endpoint.addr != "" {
+			closeMoved = closeJob{sessionID: id, addr: prev.endpoint.addr}
+		}
 	}
-	s := m.bindLocked(id, m.ensureEndpointLocked(md.ID.String(), capacity, now))
+	s := m.bindLocked(id, m.ensureEndpointLocked(md.ID.String(), addr, capacity, now))
 	resumed := s.paused
 	s.paused = false
 	s.reservedUntil = time.Time{}
@@ -67,6 +75,7 @@ func (a *ThunderAgent) PreRequest(ctx context.Context, request *fwksched.Inferen
 	s.lastActivity = now
 	m.mu.Unlock()
 
+	a.closer.enqueue(closeMoved)
 	request.PutAttribute(inflightEstimateKey, estimate)
 
 	if resumed {

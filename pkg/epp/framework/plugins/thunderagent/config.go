@@ -43,6 +43,11 @@ type Config struct {
 	// this long is admitted even when no pod has room. 0 disables it. Keep it
 	// below the priority band's request TTL, or the request is shed first.
 	HeadWaitStarvationMs float64 `json:"headWaitStarvationMs"`
+	// CloseSession enables SGLang session-radix-cache integration: tracked
+	// requests to SGLang endpoints carry session_id in the JSON body, and
+	// POST /close_session is sent when a session is paused, TTL-evicted, or
+	// moved to another endpoint.
+	CloseSession bool `json:"closeSession"`
 }
 
 func defaultConfig() Config {

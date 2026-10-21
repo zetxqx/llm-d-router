@@ -96,6 +96,7 @@ parameters:
 | `headWaitStarvationMs` | `30000` | Forced-admission backstop; 0 disables it. Keep it below the priority band's request TTL (flow control default 60 s), or the request is shed before it is force-admitted. |
 | `evictionTtlSeconds` | `3600` | Idle session state retention; must exceed `headWaitStarvationMs`. |
 | `evictionSweepSeconds` | `10` | How often the background sweep drops idle sessions. |
+| `closeSession` | `false` | Send `session_id` in the JSON body to SGLang pods and `POST /close_session` when a session is paused, TTL-evicted, or moved to another pod (for SGLang `--enable-session-radix-cache`). |
 
 ## Observability
 
@@ -104,7 +105,7 @@ Metrics (`llm_d_epp_thunder_agent_*`, all Alpha): `endpoint_working_set_tokens{e
 low utilization is the KV-thrashing signature),
 `endpoint_capacity_tokens{endpoint}`, `sessions{state}`, `releases_total{class}`,
 `delayed_dispatches_total{class}`, `pauses_total`, `resumes_total`,
-`starvation_promotions_total`. To verify the gate engaged during a run,
+`starvation_promotions_total`, `session_closes_total{result}`. To verify the gate engaged during a run,
 `pauses_total` and `delayed_dispatches_total` must be greater than zero. Session counts
 and each pod's working set and capacity are also available from the
 `/debug/plugins/state` endpoint. Session ids never appear in metrics, state

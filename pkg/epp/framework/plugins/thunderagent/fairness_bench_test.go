@@ -33,7 +33,7 @@ func BenchmarkPickAdmittedHeads(b *testing.B) {
 	now := time.Now()
 	a.mgr.mu.Lock()
 	for i := range sessions {
-		ep := a.mgr.ensureEndpointLocked(fmt.Sprintf("default/pod-%d", i%pods), 1e9, now)
+		ep := a.mgr.ensureEndpointLocked(fmt.Sprintf("default/pod-%d", i%pods), "", 1e9, now)
 		s := a.mgr.bindLocked(fmt.Sprintf("s%d", i), ep)
 		s.committedTokens, s.turnCount, s.lastResponseAt = 1000, 1, now
 	}

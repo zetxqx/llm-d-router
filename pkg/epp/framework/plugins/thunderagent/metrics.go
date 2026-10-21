@@ -36,6 +36,7 @@ type thunderMetrics struct {
 	pauses               prometheus.Counter
 	resumes              prometheus.Counter
 	starvationPromotions prometheus.Counter
+	closes               *prometheus.CounterVec
 }
 
 func newThunderMetrics(mgr *sessionManager) *thunderMetrics {
@@ -66,6 +67,11 @@ func newThunderMetrics(mgr *sessionManager) *thunderMetrics {
 			Name:      "thunder_agent_starvation_promotions_total",
 			Help:      metricsutil.HelpMsgWithStability("Queue heads force-admitted ahead of class, size, and fit by the starvation backstop.", compbasemetrics.ALPHA),
 		}),
+		closes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Subsystem: eppmetrics.LLMDRouterEndpointPickerSubsystem,
+			Name:      "thunder_agent_session_closes_total",
+			Help:      metricsutil.HelpMsgWithStability("Session close notifications sent to SGLang endpoints, by result (ok, error, dropped).", compbasemetrics.ALPHA),
+		}, []string{"result"}),
 	}
 }
 
@@ -77,6 +83,7 @@ func (m *thunderMetrics) register(reg prometheus.Registerer) error {
 		registerOrReuse(reg, &m.pauses),
 		registerOrReuse(reg, &m.resumes),
 		registerOrReuse(reg, &m.starvationPromotions),
+		registerOrReuse(reg, &m.closes),
 	)
 }
 
