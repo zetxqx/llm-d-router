@@ -73,8 +73,10 @@ type ThunderAgent struct {
 	capacityTokens       float64
 	utilThreshold        float64
 	headWaitStarvationMs float64
+	closeSession         bool
 
 	mgr     *sessionManager
+	closer  *sessionCloser
 	metrics *thunderMetrics
 }
 
@@ -91,15 +93,20 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 		return nil, fmt.Errorf("invalid parameters of the '%s' plugin: %w", ThunderAgentPluginType, err)
 	}
 
-	a := newThunderAgent(name, cfg)
+	ctx := context.Background()
+	if handle != nil {
+		ctx = handle.Context()
+	}
+	a := newThunderAgentWithContext(ctx, name, cfg)
 	if handle != nil {
 		if reg := handle.Metrics(); reg != nil {
 			if err := a.metrics.register(reg); err != nil {
+				a.closer.close()
 				return nil, fmt.Errorf("failed to register metrics of the '%s' plugin: %w", ThunderAgentPluginType, err)
 			}
 		}
 		sweepInterval := time.Duration(cfg.EvictionSweepSeconds * float64(time.Second))
-		go a.runSweep(handle.Context(), sweepInterval)
+		go a.runSweep(ctx, sweepInterval)
 	}
 	return a, nil
 }
@@ -119,14 +126,26 @@ func (a *ThunderAgent) runSweep(ctx context.Context, interval time.Duration) {
 }
 
 func newThunderAgent(name string, cfg Config) *ThunderAgent {
+	return newThunderAgentWithContext(context.Background(), name, cfg)
+}
+
+func newThunderAgentWithContext(ctx context.Context, name string, cfg Config) *ThunderAgent {
 	mgr := newSessionManager(cfg)
+	metrics := newThunderMetrics(mgr)
+	var closer *sessionCloser
+	if cfg.CloseSession {
+		closer = newSessionCloser(ctx, metrics)
+		mgr.closer = closer
+	}
 	return &ThunderAgent{
 		typedName:            fwkplugin.TypedName{Type: ThunderAgentPluginType, Name: name},
 		capacityTokens:       float64(cfg.CapacityTokens),
 		utilThreshold:        cfg.UtilThreshold,
 		headWaitStarvationMs: cfg.HeadWaitStarvationMs,
+		closeSession:         cfg.CloseSession,
 		mgr:                  mgr,
-		metrics:              newThunderMetrics(mgr),
+		closer:               closer,
+		metrics:              metrics,
 	}
 }
 

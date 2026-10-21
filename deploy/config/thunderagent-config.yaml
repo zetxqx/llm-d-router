@@ -36,6 +36,7 @@ plugins:
     idleLeaseSeconds: 30           # idle sessions keep their room this long; about a typical tool call
     headWaitStarvationMs: 1800000  # forced admission backstop
     evictionTtlSeconds: 3600       # idle session state retention; must exceed headWaitStarvationMs
+    closeSession: false            # SGLang --enable-session-radix-cache: inject session_id and POST /close_session on release
 - type: max-score-picker
 - type: single-profile-handler
 

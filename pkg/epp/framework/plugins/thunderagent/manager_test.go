@@ -30,8 +30,8 @@ var t0 = time.Unix(1_000_000, 0)
 // the old endpoint's working set and into the new one.
 func TestBindMovesSession(t *testing.T) {
 	m := newSessionManager(testConfig())
-	a := m.ensureEndpointLocked("default/ep-a", 1000, t0)
-	b := m.ensureEndpointLocked("default/ep-b", 1000, t0)
+	a := m.ensureEndpointLocked("default/ep-a", "", 1000, t0)
+	b := m.ensureEndpointLocked("default/ep-b", "", 1000, t0)
 
 	s := m.bindLocked("s1", a)
 	s.committedTokens = 300
@@ -49,7 +49,7 @@ func TestBindMovesSession(t *testing.T) {
 // removing an unknown session is a no-op.
 func TestRemoveSession(t *testing.T) {
 	m := newSessionManager(testConfig())
-	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
+	ep := m.ensureEndpointLocked("default/ep-a", "", 1000, t0)
 	m.bindLocked("s1", ep)
 
 	m.removeLocked("s1")
@@ -62,11 +62,12 @@ func TestRemoveSession(t *testing.T) {
 // time are refreshed.
 func TestEnsureEndpointRefreshes(t *testing.T) {
 	m := newSessionManager(testConfig())
-	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
+	ep := m.ensureEndpointLocked("default/ep-a", "10.0.0.1:8000", 1000, t0)
 	m.bindLocked("s1", ep)
 
 	later := t0.Add(time.Minute)
-	require.Same(t, ep, m.ensureEndpointLocked("default/ep-a", 2000, later))
+	require.Same(t, ep, m.ensureEndpointLocked("default/ep-a", "10.0.0.2:8000", 2000, later))
+	require.Equal(t, "10.0.0.2:8000", ep.addr)
 	require.Equal(t, float64(2000), ep.capacity)
 	require.Equal(t, later, ep.updatedAt)
 	require.Len(t, ep.sessions, 1)
@@ -82,8 +83,8 @@ func TestEstimateTokens(t *testing.T) {
 // set and capacity.
 func TestSnapshot(t *testing.T) {
 	m := newSessionManager(testConfig())
-	a := m.ensureEndpointLocked("default/ep-a", 1000, t0)
-	b := m.ensureEndpointLocked("default/ep-b", 2000, t0)
+	a := m.ensureEndpointLocked("default/ep-a", "", 1000, t0)
+	b := m.ensureEndpointLocked("default/ep-b", "", 2000, t0)
 
 	running := m.bindLocked("running", a)
 	running.inflightTokens = 100
@@ -106,8 +107,8 @@ func TestSnapshot(t *testing.T) {
 // endpointStaleAfter; an endpoint that still holds a session is kept.
 func TestSweepDropsStaleEmptyEndpoints(t *testing.T) {
 	m := newSessionManager(testConfig())
-	m.ensureEndpointLocked("default/empty", 1000, t0)
-	held := m.ensureEndpointLocked("default/held", 1000, t0)
+	m.ensureEndpointLocked("default/empty", "", 1000, t0)
+	held := m.ensureEndpointLocked("default/held", "", 1000, t0)
 	s := m.bindLocked("s1", held)
 	s.lastActivity = t0.Add(endpointStaleAfter + time.Second)
 
@@ -124,7 +125,7 @@ func TestSweepDropsStaleEmptyEndpoints(t *testing.T) {
 // so is a paused session whose pod left the pool.
 func TestSessionClass(t *testing.T) {
 	m := newSessionManager(testConfig())
-	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
+	ep := m.ensureEndpointLocked("default/ep-a", "", 1000, t0)
 
 	s := m.bindLocked("s1", ep)
 	require.Equal(t, classNew, s.class(), "bound, never dispatched")
@@ -186,7 +187,7 @@ func TestReclaimable(t *testing.T) {
 // reclaimable total counts exactly the sessions reclaim may pause.
 func TestIdleSessionsSkipQueued(t *testing.T) {
 	m := newSessionManager(testConfig())
-	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
+	ep := m.ensureEndpointLocked("default/ep-a", "", 1000, t0)
 	for id, tokens := range map[string]int64{"s1": 300, "s2": 200} {
 		s := m.bindLocked(id, ep)
 		s.committedTokens, s.turnCount, s.lastResponseAt = tokens, 1, t0
@@ -205,15 +206,22 @@ func TestIdleSessionsSkipQueued(t *testing.T) {
 // room covers the need; with enough room it pauses nobody.
 func TestReclaimLongestIdleFirst(t *testing.T) {
 	m := newSessionManager(testConfig())
-	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
+	ep := m.ensureEndpointLocked("default/ep-a", "10.0.0.1:8000", 1000, t0)
 	for id, idleFor := range map[string]time.Duration{"old": 3 * time.Minute, "mid": 2 * time.Minute, "new": time.Minute} {
 		s := m.bindLocked(id, ep)
 		s.committedTokens, s.turnCount = 300, 1
 		s.lastResponseAt = t0.Add(-idleFor)
 	}
 
-	require.Equal(t, 0, m.reclaimLocked(ep, t0, nil, 400, 350))
-	require.Equal(t, 2, m.reclaimLocked(ep, t0, nil, 100, 650))
+	paused, closes := m.reclaimLocked(ep, t0, nil, 400, 350)
+	require.Equal(t, 0, paused)
+	require.Empty(t, closes)
+	paused, closes = m.reclaimLocked(ep, t0, nil, 100, 650)
+	require.Equal(t, 2, paused)
+	require.Equal(t, []closeJob{
+		{sessionID: "old", addr: "10.0.0.1:8000"},
+		{sessionID: "mid", addr: "10.0.0.1:8000"},
+	}, closes)
 	require.True(t, m.sessions["old"].paused)
 	require.True(t, m.sessions["mid"].paused)
 	require.False(t, m.sessions["new"].paused)
@@ -224,7 +232,7 @@ func TestReclaimLongestIdleFirst(t *testing.T) {
 // reservation expired stays until the idle TTL.
 func TestSweepReservationExpiry(t *testing.T) {
 	m := newSessionManager(testConfig())
-	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
+	ep := m.ensureEndpointLocked("default/ep-a", "", 1000, t0)
 	fresh := m.bindLocked("fresh", ep)
 	fresh.reservedTokens, fresh.reservedUntil = 100, t0.Add(reservationTTL)
 	resumed := m.bindLocked("resumed", ep)
@@ -243,7 +251,7 @@ func TestSweepReservationExpiry(t *testing.T) {
 // session's tokens are not in its endpoint's working set.
 func TestSnapshotCountsPaused(t *testing.T) {
 	m := newSessionManager(testConfig())
-	ep := m.ensureEndpointLocked("default/ep-a", 1000, t0)
+	ep := m.ensureEndpointLocked("default/ep-a", "", 1000, t0)
 	idle := m.bindLocked("idle", ep)
 	idle.committedTokens, idle.turnCount, idle.lastActivity = 300, 1, t0
 	paused := m.bindLocked("paused", ep)

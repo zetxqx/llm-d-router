@@ -51,7 +51,7 @@ func (a *ThunderAgent) Saturation(ctx context.Context, endpoints []datalayer.End
 		}
 		id := md.ID.String()
 		_, known := m.endpoints[id]
-		m.ensureEndpointLocked(id, a.endpointCapacity(endpoint.GetMetrics()), now)
+		m.ensureEndpointLocked(id, a.closeAddr(md), a.endpointCapacity(endpoint.GetMetrics()), now)
 		if role := md.Labels[bylabel.RoleLabel]; !known && (role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill) {
 			prefillPods = append(prefillPods, id)
 		}
@@ -65,6 +65,7 @@ func (a *ThunderAgent) Saturation(ctx context.Context, endpoints []datalayer.End
 		for sid, s := range p.sessions {
 			s.endpoint = nil
 			s.paused = false
+			s.turnCount = 0
 			delete(p.sessions, sid)
 		}
 		delete(m.endpoints, id)

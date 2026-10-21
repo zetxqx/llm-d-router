@@ -65,6 +65,7 @@ func (c sessionClass) String() string {
 // session is one agent trajectory, identified by its agent-identity session id.
 // All fields are guarded by sessionManager.mu.
 type session struct {
+	id       string
 	endpoint *endpointState
 	// committedTokens is usage.total_tokens of the last completed turn.
 	committedTokens int64
@@ -123,6 +124,7 @@ func (s *session) footprint(now time.Time) float64 {
 // endpointState is the plugin's own record of one endpoint.
 type endpointState struct {
 	id       string
+	addr     string
 	capacity float64
 	// sessions are the sessions bound to this pod.
 	sessions map[string]*session
@@ -171,14 +173,16 @@ func (m *sessionManager) reclaimableTokensLocked(p *endpointState, now time.Time
 }
 
 // reclaimLocked pauses the endpoint's reclaimable sessions, longest idle
-// first, until room covers need, and returns how many it paused.
-func (m *sessionManager) reclaimLocked(p *endpointState, now time.Time, queued map[string]bool, room, need float64) int {
+// first, until room covers need, and returns how many it paused along with
+// any session close jobs.
+func (m *sessionManager) reclaimLocked(p *endpointState, now time.Time, queued map[string]bool, room, need float64) (int, []closeJob) {
 	if room >= need {
-		return 0
+		return 0, nil
 	}
 	idle := m.idleSessionsLocked(p, now, queued)
 	sort.Slice(idle, func(i, j int) bool { return idle[i].lastResponseAt.Before(idle[j].lastResponseAt) })
 	paused := 0
+	var closes []closeJob
 	for _, s := range idle {
 		if room >= need {
 			break
@@ -186,8 +190,11 @@ func (m *sessionManager) reclaimLocked(p *endpointState, now time.Time, queued m
 		s.paused = true
 		room += s.size()
 		paused++
+		if p.addr != "" {
+			closes = append(closes, closeJob{sessionID: s.id, addr: p.addr})
+		}
 	}
-	return paused
+	return paused, closes
 }
 
 // sessionManager is the ledger shared by all of the thunder agent plugin's hooks.
@@ -202,6 +209,7 @@ type sessionManager struct {
 	ttl time.Duration
 	// idleLease is how long a session keeps its room after its last response.
 	idleLease time.Duration
+	closer    *sessionCloser
 }
 
 func newSessionManager(cfg Config) *sessionManager {
@@ -214,13 +222,14 @@ func newSessionManager(cfg Config) *sessionManager {
 }
 
 // ensureEndpointLocked returns the ledger entry for an endpoint, creating
-// it on first sight and refreshing its capacity.
-func (m *sessionManager) ensureEndpointLocked(id string, capacity float64, now time.Time) *endpointState {
+// it on first sight and refreshing its address and capacity.
+func (m *sessionManager) ensureEndpointLocked(id, addr string, capacity float64, now time.Time) *endpointState {
 	p, ok := m.endpoints[id]
 	if !ok {
 		p = &endpointState{id: id, sessions: make(map[string]*session)}
 		m.endpoints[id] = p
 	}
+	p.addr = addr
 	p.capacity = capacity
 	p.updatedAt = now
 	return p
@@ -232,7 +241,7 @@ func (m *sessionManager) ensureEndpointLocked(id string, capacity float64, now t
 func (m *sessionManager) bindLocked(id string, ep *endpointState) *session {
 	s, ok := m.sessions[id]
 	if !ok {
-		s = &session{}
+		s = &session{id: id}
 		m.sessions[id] = s
 	}
 	if s.endpoint != ep {
@@ -284,7 +293,7 @@ type endpointGauge struct {
 // TTL, and empty endpoints not seen for endpointStaleAfter.
 func (m *sessionManager) sweep(now time.Time) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var closes []closeJob
 	for id, s := range m.sessions {
 		// Keep live reservations: a session Pick admitted has no activity yet,
 		// so once its reservation expires unconfirmed the TTL below drops it.
@@ -297,6 +306,9 @@ func (m *sessionManager) sweep(now time.Time) {
 		if now.Sub(s.lastActivity) <= m.ttl {
 			continue
 		}
+		if s.turnCount > 0 && !s.paused && s.endpoint != nil && s.endpoint.addr != "" {
+			closes = append(closes, closeJob{sessionID: id, addr: s.endpoint.addr})
+		}
 		m.removeLocked(id)
 	}
 	for id, p := range m.endpoints {
@@ -304,6 +316,8 @@ func (m *sessionManager) sweep(now time.Time) {
 			delete(m.endpoints, id)
 		}
 	}
+	m.mu.Unlock()
+	m.closer.enqueue(closes...)
 }
 
 // removeEndpoint drops an endpoint that left the pool. Its sessions are
@@ -318,6 +332,8 @@ func (m *sessionManager) removeEndpoint(id string) {
 	}
 	for _, s := range p.sessions {
 		s.endpoint = nil
+		s.paused = false
+		s.turnCount = 0
 	}
 	delete(m.endpoints, id)
 }
