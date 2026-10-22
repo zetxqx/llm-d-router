@@ -1974,6 +1974,46 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}
 }
 
+func TestDirector_HandleResponseBody_TimingOnlyAtEndOfStream(t *testing.T) {
+	ps1 := newTestResponseStreaming("ps1")
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	ds := datastore.NewDatastore(t.Context(), nil)
+	endpointCandidates := NewCachedEndpointCandidates(context.Background(), NewDatastoreEndpointCandidates(ds), time.Minute)
+	director := NewDirectorWithConfig(ds, &mockScheduler{}, nil, endpointCandidates, NewConfig().WithResponseStreamingPlugins(ps1))
+
+	received := time.Now().Add(-time.Second)
+	reqCtx := &handlers.RequestContext{
+		Request:                  &handlers.Request{ID: "timing-req", Headers: map[string]string{}},
+		Response:                 &handlers.Response{Headers: map[string]string{}},
+		TargetPod:                &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "ns", Name: "pod"}},
+		RequestReceivedTimestamp: received,
+		FlowControlAdmitted:      true,
+		FlowControlQueueDuration: 5 * time.Millisecond,
+	}
+	director.HandleResponseBody(ctx, reqCtx, false)
+	require.Eventually(t, func() bool {
+		ps1.mu.Lock()
+		defer ps1.mu.Unlock()
+		return len(ps1.respsOnStreaming) == 1
+	}, time.Second, 10*time.Millisecond)
+
+	// The abort path reaches the director without a completion timestamp.
+	reqCtx.TerminationCause = fwkrc.TerminationCauseClientDisconnect
+	director.HandleResponseBody(ctx, reqCtx, true)
+
+	ps1.mu.Lock()
+	defer ps1.mu.Unlock()
+	require.Len(t, ps1.respsOnStreaming, 2)
+	assert.Nil(t, ps1.respsOnStreaming[0].Timing, "intermediate chunks carry no timing")
+	timing := ps1.respsOnStreaming[1].Timing
+	require.NotNil(t, timing)
+	assert.Equal(t, received, timing.RequestReceived)
+	assert.True(t, timing.FirstByte.IsZero())
+	assert.False(t, timing.Completed.IsZero(), "director stamps completion on the abort path")
+	assert.True(t, timing.FlowControlAdmitted)
+	assert.Equal(t, 5*time.Millisecond, timing.FlowQueueWait)
+}
+
 func TestDirector_HandleResponseBody_ChunkOrdering(t *testing.T) {
 	// orderTrackingPlugin records the RequestId of each chunk it processes.
 	// Since we set a unique RequestId per chunk, the recorded order lets us
