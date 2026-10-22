@@ -30,6 +30,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/blake2s"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -41,8 +42,6 @@ const testSession = "11111111-2222-3333-4444-555555555555"
 
 var requestSeq atomic.Int64
 
-func ptr[T any](v T) *T { return &v }
-
 func TestConfigResolve(t *testing.T) {
 	base := func() Config {
 		return Config{Mode: ModeDogfood, KeySecretPath: "/k"}
@@ -53,8 +52,8 @@ func TestConfigResolve(t *testing.T) {
 		wantErr string
 	}{
 		{name: "dogfood defaults", mutate: func(*Config) {}},
-		{name: "missing mode", mutate: func(c *Config) { c.Mode = "" }, wantErr: "mode is required"},
-		{name: "unknown mode", mutate: func(c *Config) { c.Mode = "prod" }, wantErr: "unknown mode"},
+		{name: "missing mode", mutate: func(c *Config) { c.Mode = "" }, wantErr: "mode must be"},
+		{name: "unknown mode", mutate: func(c *Config) { c.Mode = "prod" }, wantErr: "mode must be"},
 		{name: "customer without consent", mutate: func(c *Config) { c.Mode = ModeCustomer }, wantErr: "consent"},
 		{name: "customer with stdout", mutate: func(c *Config) { c.Mode, c.Consent, c.Sink.Stdout = ModeCustomer, true, true }, wantErr: "stdout"},
 		{name: "customer ok", mutate: func(c *Config) { c.Mode, c.Consent = ModeCustomer, true }},
@@ -65,7 +64,7 @@ func TestConfigResolve(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := base()
 			tc.mutate(&c)
-			r, err := c.resolve()
+			r, err := c.settings()
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				return
@@ -87,19 +86,19 @@ type harness struct {
 	now    time.Time
 }
 
-func newHarness(t *testing.T, mutate func(*resolvedConfig)) *harness {
+func newHarness(t *testing.T, mutate func(*settings)) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "key")
 	require.NoError(t, os.WriteFile(keyPath, []byte("test-key-material-0123456789"), 0o600))
 	cfg, err := Config{Mode: ModeDogfood, KeySecretPath: keyPath, KeyID: "k1", SampleRate: ptr(1.0),
-		Sink: SinkConfig{Path: filepath.Join(dir, "out")}}.resolve()
+		Sink: SinkConfig{Path: filepath.Join(dir, "out")}}.settings()
 	require.NoError(t, err)
 	if mutate != nil {
 		mutate(&cfg)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r := newRecorder(ctx, "test", cfg, nil)
+	r := newRecorder(ctx, "test", cfg, func() string { return "test" })
 	require.NotNil(t, r.worker)
 	return &harness{t: t, dir: cfg.sinkPath, rec: r, cancel: cancel, now: time.UnixMilli(1_800_000_000_000)}
 }
@@ -231,7 +230,7 @@ func TestRecorderSessionsAreUnlinkable(t *testing.T) {
 }
 
 func TestRecorderFileRotationKeepsFilesSelfDecodable(t *testing.T) {
-	h := newHarness(t, func(c *resolvedConfig) { c.fileBytes = 1 })
+	h := newHarness(t, func(c *settings) { c.fileBytes = 1 })
 	turn1 := tokens(128, 0)
 	turn2 := append(append([]uint32{}, turn1...), tokens(64, 5_000)...)
 	h.turn(testSession, turn1, true)
@@ -245,7 +244,7 @@ func TestRecorderFileRotationKeepsFilesSelfDecodable(t *testing.T) {
 }
 
 func TestRecorderCustomerCoarsensArrival(t *testing.T) {
-	h := newHarness(t, func(c *resolvedConfig) { c.arrivalResolutionMs = customerArrivalResolutionMs })
+	h := newHarness(t, func(c *settings) { c.arrivalResolutionMs = customerArrivalResolutionMs })
 	h.now = h.now.Add(1234 * time.Millisecond)
 	h.turn(testSession, tokens(64, 0), true)
 	recs, _, _ := h.finish()
@@ -254,9 +253,10 @@ func TestRecorderCustomerCoarsensArrival(t *testing.T) {
 }
 
 func TestSamplingIsDeterministicAcrossReplicas(t *testing.T) {
-	cfg := resolvedConfig{sampleRate: 0.3}
-	a := &worker{cfg: cfg, key: []byte("shared-key")}
-	b := &worker{cfg: cfg, key: []byte("shared-key")}
+	cfg := settings{sampleRate: 0.3}
+	key := blake2s.Sum256([]byte("shared-key"))
+	a := &worker{cfg: cfg, key: key}
+	b := &worker{cfg: cfg, key: key}
 	sampled := 0
 	for i := range 4000 {
 		sid := "session-" + time.Duration(i).String()
@@ -269,9 +269,9 @@ func TestSamplingIsDeterministicAcrossReplicas(t *testing.T) {
 }
 
 func TestRecorderDisabledWithoutKey(t *testing.T) {
-	cfg, err := Config{Mode: ModeDogfood, KeySecretPath: filepath.Join(t.TempDir(), "missing")}.resolve()
+	cfg, err := Config{Mode: ModeDogfood, KeySecretPath: filepath.Join(t.TempDir(), "missing")}.settings()
 	require.NoError(t, err)
-	r := newRecorder(context.Background(), "test", cfg, nil)
+	r := newRecorder(context.Background(), "test", cfg, func() string { return "test" })
 	assert.Nil(t, r.worker)
 	req := &fwksched.InferenceRequest{RequestID: "r", Headers: map[string]string{}}
 	assert.NoError(t, r.PreRequest(context.Background(), req, nil))

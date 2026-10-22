@@ -18,12 +18,10 @@ package wekatrace
 
 import (
 	"container/list"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -52,13 +50,13 @@ type fileSink struct {
 	full       bool
 }
 
-func newFileSink(cfg resolvedConfig, pod string) (*fileSink, error) {
+func newFileSink(cfg settings, pod string) (*fileSink, error) {
 	if err := os.MkdirAll(cfg.sinkPath, 0o750); err != nil {
 		return nil, fmt.Errorf("create sink dir: %w", err)
 	}
 	s := &fileSink{
 		dir:       cfg.sinkPath,
-		prefix:    sanitize(pod) + "-" + time.Now().UTC().Format("20060102T150405"),
+		prefix:    pod + "-" + time.Now().UTC().Format("20060102T150405"),
 		fileBytes: cfg.fileBytes,
 		highWater: cfg.diskHighWatermark,
 		stdout:    cfg.stdout,
@@ -96,8 +94,6 @@ func (s *fileSink) finish() error {
 	}
 	return err
 }
-
-func (s *fileSink) gen() uint64 { return s.generation }
 
 func (s *fileSink) maybeRotate() bool {
 	if s.f != nil && s.written < s.fileBytes {
@@ -147,23 +143,6 @@ func (s *fileSink) diskFull() bool {
 }
 
 func (s *fileSink) close() error { return s.finish() }
-
-func sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '-' || r == '.' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			return r
-		}
-		return '_'
-	}, s)
-}
-
-func jsonLine(v any) ([]byte, error) {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	return append(b, '\n'), nil
-}
 
 // sessionLRU keeps the full-block ids of the most recent written record per
 // session within the current file generation, bounded by bytes.

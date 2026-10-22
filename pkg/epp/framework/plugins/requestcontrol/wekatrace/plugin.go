@@ -22,11 +22,12 @@ package wekatrace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
-	"sync/atomic"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -40,7 +41,122 @@ import (
 // PluginType is the registered type name.
 const PluginType = "weka-trace-recorder"
 
-const requestStateKey fwkplugin.StateKey = "weka-trace-recorder.request"
+// Mode values.
+const (
+	ModeDogfood  = "dogfood"
+	ModeCustomer = "customer"
+)
+
+const (
+	defaultSampleRate        = 0.01
+	defaultSinkPath          = "/var/weka-trace"
+	defaultFileBytes         = 64 << 20
+	defaultDiskHighWatermark = 900 << 20
+	// queueBytes bounds pending work, including referenced token slices.
+	queueBytes = 64 << 20
+	// lruBytes bounds the per-session delta state.
+	lruBytes = 64 << 20
+	// customerArrivalResolutionMs coarsens arrival times in customer mode so
+	// that joining records to trace backends by timestamp is less precise.
+	customerArrivalResolutionMs = 100
+
+	requestStateKey fwkplugin.StateKey = "weka-trace-recorder.request"
+)
+
+// Config is the plugin's parameter block. See README.md.
+type Config struct {
+	Mode                     string     `json:"mode"`
+	Consent                  bool       `json:"consent"`
+	KeySecretPath            string     `json:"keySecretPath"`
+	KeyID                    string     `json:"keyID"`
+	SampleRate               *float64   `json:"sampleRate,omitempty"`
+	AdditionalSessionHeaders []string   `json:"additionalSessionHeaders,omitempty"`
+	ModelAllowlist           []string   `json:"modelAllowlist,omitempty"`
+	Sink                     SinkConfig `json:"sink"`
+}
+
+// SinkConfig configures the file sink.
+type SinkConfig struct {
+	Path              string             `json:"path,omitempty"`
+	FileBytes         *resource.Quantity `json:"fileBytes,omitempty"`
+	DiskHighWatermark *resource.Quantity `json:"diskHighWatermark,omitempty"`
+	Stdout            bool               `json:"stdout,omitempty"`
+}
+
+// settings is Config after validation and defaulting.
+type settings struct {
+	keySecretPath       string
+	keyID               string
+	sampleRate          float64
+	sessionHeaders      []string
+	modelAllowlist      map[string]bool
+	sinkPath            string
+	fileBytes           int64
+	diskHighWatermark   int64
+	stdout              bool
+	arrivalResolutionMs int64
+}
+
+// settings validates c. Errors fail config loading, so they are reserved for
+// misconfiguration that must be visible at deploy time.
+func (c Config) settings() (settings, error) {
+	switch {
+	case c.Mode != ModeDogfood && c.Mode != ModeCustomer:
+		return settings{}, fmt.Errorf("mode must be %q or %q, got %q", ModeDogfood, ModeCustomer, c.Mode)
+	case c.Mode == ModeCustomer && !c.Consent:
+		return settings{}, errors.New("mode customer requires consent: true")
+	case c.Mode == ModeCustomer && c.Sink.Stdout:
+		return settings{}, errors.New("sink.stdout is not allowed in mode customer")
+	case c.KeySecretPath == "":
+		return settings{}, errors.New("keySecretPath is required")
+	}
+	s := settings{
+		keySecretPath:     c.KeySecretPath,
+		keyID:             c.KeyID,
+		sampleRate:        defaultSampleRate,
+		modelAllowlist:    map[string]bool{},
+		sinkPath:          c.Sink.Path,
+		fileBytes:         defaultFileBytes,
+		diskHighWatermark: defaultDiskHighWatermark,
+		stdout:            c.Sink.Stdout,
+	}
+	if c.SampleRate != nil {
+		s.sampleRate = *c.SampleRate
+	}
+	if s.sampleRate < 0 || s.sampleRate > 1 {
+		return settings{}, fmt.Errorf("sampleRate %v is outside [0, 1]", s.sampleRate)
+	}
+	if s.sinkPath == "" {
+		s.sinkPath = defaultSinkPath
+	}
+	if c.Sink.FileBytes != nil {
+		s.fileBytes = c.Sink.FileBytes.Value()
+	}
+	if c.Sink.DiskHighWatermark != nil {
+		s.diskHighWatermark = c.Sink.DiskHighWatermark.Value()
+	}
+	if s.fileBytes <= 0 || s.diskHighWatermark <= 0 {
+		return settings{}, errors.New("sink byte limits must be positive")
+	}
+	if c.Mode == ModeCustomer {
+		s.arrivalResolutionMs = customerArrivalResolutionMs
+	}
+	for _, m := range c.ModelAllowlist {
+		s.modelAllowlist[m] = true
+	}
+	for _, h := range c.AdditionalSessionHeaders {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			s.sessionHeaders = append(s.sessionHeaders, h)
+		}
+	}
+	s.sessionHeaders = append(s.sessionHeaders,
+		agentidentity.ClaudeCodeSessionHeader,
+		agentidentity.OpenCodeSessionHeader,
+		agentidentity.CodexSessionHeader,
+		agentidentity.CodexSessionHeaderLegacy,
+	)
+	return s, nil
+}
 
 var (
 	_ requestcontrol.PreRequest            = &Recorder{}
@@ -52,12 +168,11 @@ var (
 // Recorder implements the weka-trace-recorder plugin.
 type Recorder struct {
 	typedName fwkplugin.TypedName
-	cfg       resolvedConfig
+	cfg       settings
 	state     *fwkplugin.PluginState
-	handle    fwkplugin.Handle
 	// worker is nil when the recorder disabled itself (for example, no key).
 	worker *worker
-	stats  *stats
+	stats  *counters
 }
 
 // Factory builds a Recorder from raw parameters.
@@ -68,41 +183,42 @@ func Factory(name string, rawParameters *json.Decoder, handle fwkplugin.Handle) 
 			return nil, fmt.Errorf("failed to parse parameters for plugin %q: %w", name, err)
 		}
 	}
-	resolved, err := cfg.resolve()
+	s, err := cfg.settings()
 	if err != nil {
 		return nil, fmt.Errorf("invalid parameters for plugin %q: %w", name, err)
 	}
-	ctx := context.Background()
+	ctx, backend := context.Background(), func() string { return "unknown" }
 	if handle != nil {
-		ctx = handle.Context()
+		ctx, backend = handle.Context(), func() string { return tokenBackend(handle) }
 	}
-	return newRecorder(ctx, name, resolved, handle), nil
+	return newRecorder(ctx, name, s, backend), nil
 }
 
-func newRecorder(ctx context.Context, name string, cfg resolvedConfig, handle fwkplugin.Handle) *Recorder {
+// newRecorder disables the recorder, rather than failing, when the key or the
+// sink is unavailable: recording must never affect requests.
+func newRecorder(ctx context.Context, name string, s settings, backend func() string) *Recorder {
 	r := &Recorder{
 		typedName: fwkplugin.TypedName{Type: PluginType, Name: name},
-		cfg:       cfg,
+		cfg:       s,
 		state:     fwkplugin.NewPluginState(ctx),
-		handle:    handle,
-		stats:     &stats{},
+		stats:     &counters{},
 	}
 	logger := log.FromContext(ctx).WithValues("plugin", PluginType)
-	key, err := os.ReadFile(cfg.keySecretPath)
+	key, err := os.ReadFile(s.keySecretPath)
 	if err == nil && len(key) == 0 {
-		err = fmt.Errorf("key file %q is empty", cfg.keySecretPath)
+		err = fmt.Errorf("key file %q is empty", s.keySecretPath)
 	}
 	if err != nil {
 		logger.Error(err, "Recorder disabled: PRF key unavailable")
 		return r
 	}
-	sink, err := newFileSink(cfg, podName())
+	sink, err := newFileSink(s, podName())
 	if err != nil {
 		logger.Error(err, "Recorder disabled: sink unavailable")
 		return r
 	}
-	r.worker = newWorker(ctx, cfg, key, sink, r.stats, r.tokenBackend)
-	logger.Info("Recorder enabled", "mode", cfg.mode, "kid", cfg.keyID, "sampleRate", cfg.sampleRate, "path", cfg.sinkPath)
+	r.worker = newWorker(ctx, s, key, sink, r.stats, backend)
+	logger.Info("Recorder enabled", "kid", s.keyID, "sampleRate", s.sampleRate, "path", s.sinkPath)
 	return r
 }
 
@@ -116,7 +232,8 @@ func (r *Recorder) Consumes() fwkplugin.DataDependencies {
 	}
 }
 
-// requestState is what PreRequest hands to the end-of-stream hook.
+// requestState is what PreRequest hands to the end-of-stream hook. The request
+// pointer is shared on purpose: its body is not mutated after scheduling.
 type requestState struct {
 	sessionID string
 	request   *fwksched.InferenceRequest
@@ -124,24 +241,25 @@ type requestState struct {
 	profile   string
 }
 
-// Clone implements fwkplugin.StateData. The request pointer is shared on
-// purpose: its body is not mutated after scheduling.
+// Clone implements fwkplugin.StateData.
 func (s *requestState) Clone() fwkplugin.StateData {
-	if s == nil {
-		return nil
-	}
 	cp := *s
 	return &cp
 }
 
 // PreRequest decides sampling and captures what the end-of-stream hook needs.
 // It always returns nil: a returned error fails the request.
-func (r *Recorder) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) (err error) {
+func (r *Recorder) PreRequest(ctx context.Context, request *fwksched.InferenceRequest, result *fwksched.SchedulingResult) error {
 	defer r.recoverHook(ctx, "PreRequest")
 	if r.worker == nil || request == nil || request.RequestID == "" {
 		return nil
 	}
-	sid := sessionIDFromHeaders(request.Headers, r.cfg.sessionHeaders)
+	sid := ""
+	for _, h := range r.cfg.sessionHeaders {
+		if sid = strings.TrimSpace(request.Headers[h]); sid != "" {
+			break
+		}
+	}
 	if !r.worker.sampled(sid, request.RequestID) {
 		return nil
 	}
@@ -157,8 +275,7 @@ func (r *Recorder) PreRequest(ctx context.Context, request *fwksched.InferenceRe
 	return nil
 }
 
-// ResponseBody enqueues a record at end of stream. Intermediate chunks return
-// immediately.
+// ResponseBody enqueues a record at end of stream; other chunks return at once.
 func (r *Recorder) ResponseBody(ctx context.Context, request *fwksched.InferenceRequest, response *requestcontrol.Response, _ *fwkdl.EndpointMetadata) {
 	defer r.recoverHook(ctx, "ResponseBody")
 	if response == nil || !response.EndOfStream || r.worker == nil || request == nil || request.RequestID == "" {
@@ -166,10 +283,9 @@ func (r *Recorder) ResponseBody(ctx context.Context, request *fwksched.Inference
 	}
 	st, err := fwkplugin.ReadPluginStateKey[*requestState](r.state, request.RequestID, requestStateKey)
 	r.state.Delete(request.RequestID)
-	if err != nil || st == nil {
-		return
+	if err == nil {
+		r.worker.enqueue(st, response)
 	}
-	r.worker.enqueue(newJob(st, response))
 }
 
 func (r *Recorder) recoverHook(ctx context.Context, hook string) {
@@ -179,48 +295,19 @@ func (r *Recorder) recoverHook(ctx context.Context, hook string) {
 	}
 }
 
+// DumpState exposes counters for the operational debug endpoint.
+func (r *Recorder) DumpState() (json.RawMessage, error) {
+	return json.Marshal(map[string]any{"enabled": r.worker != nil, "kid": r.cfg.keyID, "counters": r.stats})
+}
+
 // tokenBackend reports the configured token-producer backend, or "none".
-func (r *Recorder) tokenBackend() string {
-	if r.handle == nil {
-		return "unknown"
-	}
-	for _, p := range r.handle.GetAllPlugins() {
+func tokenBackend(handle fwkplugin.Handle) string {
+	for _, p := range handle.GetAllPlugins() {
 		if b, ok := p.(interface{ Backend() string }); ok && p.TypedName().Type == tokenizer.PluginType {
 			return b.Backend()
 		}
 	}
 	return "none"
-}
-
-// DumpState exposes counters for the operational debug endpoint.
-func (r *Recorder) DumpState() (json.RawMessage, error) {
-	return json.Marshal(r.stats.snapshot(r.worker != nil, r.cfg.keyID))
-}
-
-// sessionHeaders returns the operator headers followed by the agent-identity
-// defaults, lowercased.
-func sessionHeaders(additional []string) []string {
-	out := make([]string, 0, len(additional)+4)
-	for _, h := range additional {
-		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
-			out = append(out, h)
-		}
-	}
-	return append(out,
-		agentidentity.ClaudeCodeSessionHeader,
-		agentidentity.OpenCodeSessionHeader,
-		agentidentity.CodexSessionHeader,
-		agentidentity.CodexSessionHeaderLegacy,
-	)
-}
-
-func sessionIDFromHeaders(headers map[string]string, names []string) string {
-	for _, h := range names {
-		if v := strings.TrimSpace(headers[h]); v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 func podName() string {
@@ -229,40 +316,4 @@ func podName() string {
 	}
 	h, _ := os.Hostname()
 	return h
-}
-
-// stats are process-local counters exposed through DumpState.
-type stats struct {
-	written      atomic.Int64
-	droppedQueue atomic.Int64
-	droppedSink  atomic.Int64
-	droppedDisk  atomic.Int64
-	keyframes    atomic.Int64
-	panics       atomic.Int64
-	workerPanics atomic.Int64
-	queueBytes   atomic.Int64
-	bytesWritten atomic.Int64
-}
-
-type statsSnapshot struct {
-	Enabled      bool   `json:"enabled"`
-	Kid          string `json:"kid"`
-	Written      int64  `json:"written"`
-	DroppedQueue int64  `json:"droppedQueue"`
-	DroppedSink  int64  `json:"droppedSink"`
-	DroppedDisk  int64  `json:"droppedDisk"`
-	Keyframes    int64  `json:"keyframes"`
-	Panics       int64  `json:"panics"`
-	WorkerPanics int64  `json:"workerPanics"`
-	QueueBytes   int64  `json:"queueBytes"`
-	BytesWritten int64  `json:"bytesWritten"`
-}
-
-func (s *stats) snapshot(enabled bool, kid string) statsSnapshot {
-	return statsSnapshot{
-		Enabled: enabled, Kid: kid,
-		Written: s.written.Load(), DroppedQueue: s.droppedQueue.Load(), DroppedSink: s.droppedSink.Load(),
-		DroppedDisk: s.droppedDisk.Load(), Keyframes: s.keyframes.Load(), Panics: s.panics.Load(),
-		WorkerPanics: s.workerPanics.Load(), QueueBytes: s.queueBytes.Load(), BytesWritten: s.bytesWritten.Load(),
-	}
 }

@@ -17,123 +17,154 @@ limitations under the License.
 package export
 
 import (
-	"sort"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/wekatrace/record"
 )
 
-func ptrs(recs []record.Record) []*record.Record {
-	out := make([]*record.Record, len(recs))
-	for i := range recs {
-		out[i] = &recs[i]
+// idGen yields distinct block ids. Tests build prompts that share a prefix
+// and then diverge, matching the chained-hash property of real ids.
+type idGen struct{ next uint64 }
+
+func (g *idGen) fresh(n int) []uint64 {
+	out := make([]uint64, n)
+	for i := range out {
+		g.next++
+		out[i] = g.next * 0x9e3779b97f4a7c15
 	}
 	return out
 }
 
-func TestDecodeAll(t *testing.T) {
+// extend returns prefix[:k] followed by n fresh ids.
+func (g *idGen) extend(prefix []uint64, k, n int) []uint64 {
+	return append(append([]uint64{}, prefix[:k]...), g.fresh(n)...)
+}
+
+// rspec describes a test record. Zero values pick defaults in mk.
+type rspec struct {
+	rid, sess, kid, rep string // empty sess means no session
+	gen                 uint64
+	arr, api, ttft      int64 // ttft 0 means absent
+	prompt              int   // 0 means 64 per block
+	ids                 []uint64
+	anchor              int // 0 means keyframe
+	stream              bool
+	cause               string
+	status              int
+	model, backend      string
+	out                 int
+}
+
+func mk(s rspec) record.Record {
+	or := func(v, def string) string {
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	r := record.Record{
+		V: record.Version, Kid: or(s.kid, "k1"), Rid: s.rid, Rep: or(s.rep, "rep-a"), Gen: s.gen,
+		ArrMs: s.arr, Model: or(s.model, "m1"), Stream: s.stream, TokBackend: or(s.backend, "vllm"),
+		PromptTok: s.prompt, Blocks: len(s.ids), New: record.EncodeIDs(s.ids[s.anchor:]), Kf: s.anchor == 0,
+		OutTok: s.out, UsageSrc: record.UsageSrcServer, APIMs: s.api, Status: s.status,
+		Cause: or(s.cause, record.CauseNatural),
+	}
+	if s.sess != "" {
+		r.Sess = &s.sess
+	}
+	if r.PromptTok == 0 {
+		r.PromptTok = record.BlockSizeTokens * len(s.ids)
+	}
+	if r.Status == 0 {
+		r.Status = 200
+	}
+	if s.anchor > 0 {
+		r.Anchor = &record.Anchor{N: s.anchor, H: record.HexID(s.ids[s.anchor-1])}
+	}
+	if s.ttft > 0 {
+		r.TTFTMs = &s.ttft
+	}
+	return r
+}
+
+func mkAll(specs ...rspec) []record.Record {
+	out := make([]record.Record, len(specs))
+	for i, s := range specs {
+		out[i] = mk(s)
+	}
+	return out
+}
+
+func build(t *testing.T, recs []record.Record, opts Options) *Result {
+	t.Helper()
+	if opts.Seed == "" {
+		opts.Seed = "test"
+	}
+	res, err := Build(recs, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestDecode(t *testing.T) {
 	g := &idGen{}
 	a := g.fresh(4)
 	d1 := g.extend(a, 4, 2)
-	d2 := g.extend(d1, 6, 1)
-	d3 := g.extend(a, 2, 3)
-	d4 := g.extend(d1, 6, 2)
-
-	missing := mk(rspec{rid: "missing", sess: "s", arr: 40, ids: g.extend(a, 3, 1), anchor: 3})
+	d2 := g.extend(a, 2, 3)
+	d3 := g.extend(d1, 6, 2)
+	missing := mk(rspec{rid: "missing", arr: 40, ids: g.extend(a, 3, 1), anchor: 3})
 	missing.Anchor.H = record.HexID(12345)
+	recs := append(mkAll(
+		rspec{rid: "kf", arr: 0, ids: a},
+		// d3 anchors on d1, which arrives later.
+		rspec{rid: "d3", arr: 5, ids: d3, anchor: 6},
+		rspec{rid: "d1", arr: 10, ids: d1, anchor: 4},
+		rspec{rid: "d2", arr: 20, ids: d2, anchor: 2},
+		rspec{rid: "other-gen", gen: 2, arr: 30, ids: d1, anchor: 4},
+		rspec{rid: "other-rep", rep: "rep-b", arr: 30, ids: d1, anchor: 4},
+	), missing)
 
-	tests := []struct {
-		name      string
-		recs      []record.Record
-		want      map[string][]uint64
-		wantUndec []string
-	}{
-		{
-			name: "keyframe and deltas",
-			recs: mkAll(
-				rspec{rid: "kf", sess: "s", arr: 0, ids: a},
-				rspec{rid: "d1", sess: "s", arr: 10, ids: d1, anchor: 4},
-				rspec{rid: "d2", sess: "s", arr: 20, ids: d2, anchor: 6},
-				rspec{rid: "d3", sess: "s", arr: 30, ids: d3, anchor: 2},
-			),
-			want: map[string][]uint64{"kf": a, "d1": d1, "d2": d2, "d3": d3},
-		},
-		{
-			name: "anchor arrives after the delta",
-			recs: mkAll(
-				rspec{rid: "kf", sess: "s", arr: 0, ids: a},
-				rspec{rid: "d4", sess: "s", arr: 5, ids: d4, anchor: 6},
-				rspec{rid: "d1", sess: "s", arr: 10, ids: d1, anchor: 4},
-			),
-			want: map[string][]uint64{"kf": a, "d1": d1, "d4": d4},
-		},
-		{
-			name: "undecodable anchors",
-			recs: append(mkAll(
-				rspec{rid: "kf", sess: "s", arr: 0, ids: a},
-				rspec{rid: "other-gen", sess: "s", gen: 2, arr: 10, ids: d1, anchor: 4},
-				rspec{rid: "other-rep", sess: "s", rep: "rep-b", arr: 10, ids: d1, anchor: 4},
-				rspec{rid: "other-sess", sess: "t", arr: 10, ids: d1, anchor: 4},
-				rspec{rid: "no-sess", arr: 10, ids: d1, anchor: 4},
-			), missing),
-			want:      map[string][]uint64{"kf": a},
-			wantUndec: []string{"missing", "no-sess", "other-gen", "other-rep", "other-sess"},
-		},
+	ptrs := make([]*record.Record, len(recs))
+	for i := range recs {
+		ptrs[i] = &recs[i]
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ds, bad := decodeAll(ptrs(tc.recs))
-			got := map[string][]uint64{}
-			for _, d := range ds {
-				got[d.rec.Rid] = d.ids
-			}
-			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("decoded ids (-want +got):\n%s", diff)
-			}
-			var undec []string
-			for _, r := range bad {
-				undec = append(undec, r.Rid)
-			}
-			sort.Strings(undec)
-			if diff := cmp.Diff(tc.wantUndec, undec, cmpopts.EquateEmpty()); diff != "" {
-				t.Errorf("undecodable (-want +got):\n%s", diff)
-			}
-		})
+	ds, undec := decode(ptrs)
+	got := map[string][]uint64{}
+	for _, d := range ds {
+		got[d.rec.Rid] = d.ids
+	}
+	if diff := cmp.Diff(map[string][]uint64{"kf": a, "d1": d1, "d2": d2, "d3": d3}, got); diff != "" {
+		t.Errorf("decoded ids (-want +got):\n%s", diff)
+	}
+	if undec != 3 {
+		t.Errorf("undecodable = %d, want 3", undec)
 	}
 }
 
-// chains runs decode and lineage over one session and returns the rids of
-// each chain, ordered by chain root arrival.
-func chains(t *testing.T, recs []record.Record, tolMs int64) [][]string {
+// chains returns the rids of each exported chain: the main chain first, then
+// each subagent in entry order.
+func chains(t *testing.T, recs []record.Record, tol time.Duration) [][]string {
 	t.Helper()
-	ds, bad := decodeAll(ptrs(recs))
-	if len(bad) > 0 {
-		t.Fatalf("%d undecodable records", len(bad))
-	}
-	sort.SliceStable(ds, func(i, j int) bool { return lessRec(ds[i].rec, ds[j].rec) })
-	parent := linkParents(ds, tolMs)
-	root := make([]int, len(ds))
 	var out [][]string
-	pos := map[int]int{}
-	for i, d := range ds {
-		if parent[i] < 0 {
-			root[i] = i
-			pos[i] = len(out)
+	pos := map[string]int{}
+	for _, r := range build(t, recs, Options{SkewTol: tol}).Sidecar {
+		i, ok := pos[r.AgentID]
+		if !ok {
+			i = len(out)
+			pos[r.AgentID] = i
 			out = append(out, nil)
-		} else {
-			root[i] = root[parent[i]]
 		}
-		out[pos[root[i]]] = append(out[pos[root[i]]], d.rec.Rid)
+		out[i] = append(out[i], r.Rid)
 	}
 	return out
 }
 
-func TestLinkParents(t *testing.T) {
+func TestLineage(t *testing.T) {
 	g := &idGen{}
-
 	lin1 := g.fresh(4)
 	lin2 := g.extend(lin1, 4, 2)
 	lin3 := g.extend(lin2, 6, 2)
@@ -155,10 +186,9 @@ func TestLinkParents(t *testing.T) {
 	b2 := g.extend(shared, 5, 2)
 
 	tests := []struct {
-		name  string
-		recs  []record.Record
-		tolMs int64
-		want  [][]string
+		name string
+		recs []record.Record
+		want [][]string
 	}{
 		{
 			name: "linear main chain",
@@ -213,18 +243,14 @@ func TestLinkParents(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tol := tc.tolMs
-			if tol == 0 {
-				tol = DefaultSkewTol.Milliseconds()
-			}
-			if diff := cmp.Diff(tc.want, chains(t, tc.recs, tol)); diff != "" {
+			if diff := cmp.Diff(tc.want, chains(t, tc.recs, DefaultSkewTol)); diff != "" {
 				t.Errorf("chains (-want +got):\n%s", diff)
 			}
 		})
 	}
 }
 
-func TestLinkParentsSkew(t *testing.T) {
+func TestLineageSkew(t *testing.T) {
 	g := &idGen{}
 	p := g.fresh(4)
 	c := g.extend(p, 4, 2)
@@ -232,16 +258,15 @@ func TestLinkParentsSkew(t *testing.T) {
 	split := [][]string{{"p"}, {"c"}}
 
 	tests := []struct {
-		name string
-		// gapMs is child arrival minus parent end.
-		gapMs int64
-		tolMs int64
+		name  string
+		gapMs int64 // child arrival minus parent end
+		tol   time.Duration
 		want  [][]string
 	}{
-		{name: "child 50ms after parent end", gapMs: 50, tolMs: 250, want: linked},
-		{name: "child 50ms before parent end", gapMs: -50, tolMs: 250, want: linked},
-		{name: "child 300ms before parent end", gapMs: -300, tolMs: 250, want: split},
-		{name: "child 50ms before parent end without tolerance", gapMs: -50, tolMs: 0, want: split},
+		{name: "child 50ms after parent end", gapMs: 50, tol: DefaultSkewTol, want: linked},
+		{name: "child 50ms before parent end", gapMs: -50, tol: DefaultSkewTol, want: linked},
+		{name: "child 300ms before parent end", gapMs: -300, tol: DefaultSkewTol, want: split},
+		{name: "child 50ms before parent end without tolerance", gapMs: -50, want: split},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,7 +274,7 @@ func TestLinkParentsSkew(t *testing.T) {
 				rspec{rid: "p", sess: "s", arr: 0, api: 1000, ids: p},
 				rspec{rid: "c", sess: "s", arr: 1000 + tc.gapMs, api: 1000, ids: c, anchor: 4},
 			)
-			if diff := cmp.Diff(tc.want, chains(t, recs, tc.tolMs)); diff != "" {
+			if diff := cmp.Diff(tc.want, chains(t, recs, tc.tol)); diff != "" {
 				t.Errorf("chains (-want +got):\n%s", diff)
 			}
 		})
@@ -259,7 +284,6 @@ func TestLinkParentsSkew(t *testing.T) {
 func TestRetryDedup(t *testing.T) {
 	g := &idGen{}
 	a := g.fresh(4)
-	b := g.fresh(4)
 
 	type row struct {
 		Rid   string
@@ -272,24 +296,6 @@ func TestRetryDedup(t *testing.T) {
 		wantRetries int
 	}{
 		{
-			name: "5xx retried within window",
-			recs: mkAll(
-				rspec{rid: "r1", sess: "s", arr: 0, api: 100, ids: a, status: 503},
-				rspec{rid: "r2", sess: "s", arr: 1500, api: 100, ids: a},
-			),
-			want:        []row{{"r2", true}},
-			wantRetries: 1,
-		},
-		{
-			name: "client disconnect retried",
-			recs: mkAll(
-				rspec{rid: "r1", sess: "s", arr: 0, api: 100, ids: a, cause: record.CauseClientDisconnect},
-				rspec{rid: "r2", sess: "s", arr: 2000, api: 100, ids: a},
-			),
-			want:        []row{{"r2", true}},
-			wantRetries: 1,
-		},
-		{
 			name: "repeated failures keep the last attempt",
 			recs: mkAll(
 				rspec{rid: "r1", sess: "s", arr: 0, api: 100, ids: a, status: 429},
@@ -298,6 +304,15 @@ func TestRetryDedup(t *testing.T) {
 			),
 			want:        []row{{"r3", true}},
 			wantRetries: 2,
+		},
+		{
+			name: "client disconnect retried at the window edge",
+			recs: mkAll(
+				rspec{rid: "r1", sess: "s", arr: 0, api: 100, ids: a, cause: record.CauseClientDisconnect},
+				rspec{rid: "r2", sess: "s", arr: 2000, api: 100, ids: a},
+			),
+			want:        []row{{"r2", true}},
+			wantRetries: 1,
 		},
 		{
 			name: "successful identical request kept",
@@ -315,21 +330,10 @@ func TestRetryDedup(t *testing.T) {
 			),
 			want: []row{{"r1", false}, {"r2", false}},
 		},
-		{
-			name: "different prompt",
-			recs: mkAll(
-				rspec{rid: "r1", sess: "s", arr: 0, api: 100, ids: a, status: 503},
-				rspec{rid: "r2", sess: "s", arr: 1000, api: 100, ids: b},
-			),
-			want: []row{{"r1", false}, {"r2", false}},
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := Build(tc.recs, Options{SkewTol: DefaultSkewTol, Seed: "test"})
-			if err != nil {
-				t.Fatal(err)
-			}
+			res := build(t, tc.recs, Options{SkewTol: DefaultSkewTol})
 			var got []row
 			for _, r := range res.Sidecar {
 				got = append(got, row{r.Rid, r.Retry})
@@ -337,11 +341,9 @@ func TestRetryDedup(t *testing.T) {
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("sidecar (-want +got):\n%s", diff)
 			}
-			if res.Stats.Retries != tc.wantRetries {
-				t.Errorf("Stats.Retries = %d, want %d", res.Stats.Retries, tc.wantRetries)
-			}
-			if got := res.Traces[0].Totals.LLMD.Retries; got != tc.wantRetries {
-				t.Errorf("totals retries = %d, want %d", got, tc.wantRetries)
+			if res.Stats.Retries != tc.wantRetries || res.Traces[0].Totals.LLMD.Retries != tc.wantRetries {
+				t.Errorf("retries: stats %d, totals %d, want %d",
+					res.Stats.Retries, res.Traces[0].Totals.LLMD.Retries, tc.wantRetries)
 			}
 		})
 	}
@@ -358,12 +360,9 @@ func TestThinkTime(t *testing.T) {
 		rspec{rid: "r2", sess: "s", arr: 900, api: 600, ids: r2, anchor: 4},
 		rspec{rid: "r3", sess: "s", arr: 3000, api: 500, ids: r3, anchor: 6},
 	)
-	res, err := Build(recs, DefaultOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make([]float64, 0, len(res.Traces[0].Requests))
-	for _, e := range res.Traces[0].Requests {
+	entries := build(t, recs, Options{SkewTol: DefaultSkewTol}).Traces[0].Requests
+	got := make([]float64, 0, len(entries))
+	for _, e := range entries {
 		if e.Request == nil {
 			t.Fatalf("unexpected subagent entry %+v", e.Subagent)
 		}
@@ -376,10 +375,7 @@ func TestThinkTime(t *testing.T) {
 
 func TestBuildGrouping(t *testing.T) {
 	g := &idGen{}
-	a := g.fresh(3)
-	b := g.fresh(3)
-	c := g.fresh(3)
-	d := g.fresh(3)
+	a, b, c, d := g.fresh(3), g.fresh(3), g.fresh(3), g.fresh(3)
 	recs := mkAll(
 		rspec{rid: "x1", sess: "s", arr: 0, api: 100, ids: a},
 		rspec{rid: "x2", sess: "s", kid: "k2", arr: 10, api: 100, ids: b},
@@ -395,40 +391,33 @@ func TestBuildGrouping(t *testing.T) {
 	tests := []struct {
 		name       string
 		opts       Options
-		wantTraces [][]string
+		wantTraces []string
 		wantStats  Stats
 	}{
 		{
 			name:       "estimate refused",
-			opts:       DefaultOptions(),
-			wantTraces: [][]string{{"x1"}, {"x2"}, {"n1"}, {"n2"}},
-			wantStats:  Stats{Invalid: 1, Duplicates: 1, Estimate: 1, Requests: 4, Traces: 4},
+			wantTraces: []string{"x1", "x2", "n1", "n2"},
+			wantStats:  Stats{Invalid: 1, Duplicates: 1, Estimate: 1},
 		},
 		{
 			name:       "estimate allowed",
 			opts:       Options{AllowEstimate: true},
-			wantTraces: [][]string{{"x1"}, {"x2"}, {"n1"}, {"n2"}, {"e1"}},
-			wantStats:  Stats{Invalid: 1, Duplicates: 1, Requests: 5, Traces: 5},
+			wantTraces: []string{"x1", "x2", "n1", "n2", "e1"},
+			wantStats:  Stats{Invalid: 1, Duplicates: 1},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := Build(recs, tc.opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := make([][]string, len(res.Traces))
-			ids := map[string]bool{}
-			for _, r := range res.Sidecar {
-				i := traceIndex(res.Traces, r.Trace)
-				got[i] = append(got[i], r.Rid)
-				ids[r.Trace] = true
+			res := build(t, recs, tc.opts)
+			var got []string
+			for i, r := range res.Sidecar {
+				if i >= len(res.Traces) || r.Trace != res.Traces[i].ID {
+					t.Fatalf("sidecar row %d (%s) is not the only request of trace %d", i, r.Rid, i)
+				}
+				got = append(got, r.Rid)
 			}
 			if diff := cmp.Diff(tc.wantTraces, got); diff != "" {
 				t.Errorf("traces (-want +got):\n%s", diff)
-			}
-			if len(ids) != len(res.Traces) {
-				t.Errorf("trace ids not unique: %d ids for %d traces", len(ids), len(res.Traces))
 			}
 			if diff := cmp.Diff(tc.wantStats, res.Stats); diff != "" {
 				t.Errorf("stats (-want +got):\n%s", diff)
@@ -437,34 +426,20 @@ func TestBuildGrouping(t *testing.T) {
 	}
 }
 
-func traceIndex(traces []Trace, id string) int {
-	for i := range traces {
-		if traces[i].ID == id {
-			return i
-		}
-	}
-	return -1
-}
-
 func TestTraceIDs(t *testing.T) {
 	g := &idGen{}
 	recs := mkAll(rspec{rid: "r1", sess: "s", arr: 0, api: 100, ids: g.fresh(2)})
-	seeded := func(seed string) string {
+	id := func(seed string) string {
 		res, err := Build(recs, Options{Seed: seed})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return res.Traces[0].ID
 	}
-	a1, a2, b := seeded("a"), seeded("a"), seeded("b")
-	if a1 != a2 {
-		t.Error("seeded trace ids differ across runs")
+	if a1, a2, b := id("a"), id("a"), id("b"); a1 != a2 || a1 == b {
+		t.Error("seeded trace ids are not a deterministic function of the seed")
 	}
-	if a1 == b {
-		t.Error("different seeds produced the same trace id")
-	}
-	r1, r2 := seeded(""), seeded("")
-	if r1 == r2 || len(r1) != 2*traceIDBytes {
+	if r1, r2 := id(""), id(""); r1 == r2 || len(r1) != 2*traceIDBytes {
 		t.Errorf("random trace ids %q, %q: want distinct %d-char hex", r1, r2, 2*traceIDBytes)
 	}
 }

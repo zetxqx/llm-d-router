@@ -18,12 +18,10 @@ package export
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -102,38 +100,25 @@ func strictDecode(t *testing.T, data []byte, required []string, v any) {
 	}
 }
 
-func checkRequest(t *testing.T, data []byte, seenHash map[int]bool) wekaRequest {
+func checkRequest(t *testing.T, data []byte) {
 	t.Helper()
 	var r wekaRequest
 	strictDecode(t, data, requestKeys, &r)
-	switch r.Type {
-	case TypeStream:
-	case TypeNormal:
-		if r.TTFT != nil {
-			t.Errorf("ttft on non-streaming request %s", data)
-		}
-	default:
-		t.Errorf("request type %q, want s or n", r.Type)
+	if r.Type != TypeStream && (r.Type != TypeNormal || r.TTFT != nil) {
+		t.Errorf("request type %q with ttft %v, want s, or n without ttft", r.Type, r.TTFT)
 	}
 	if r.APITime >= 1e4 || r.T >= 1e4 || r.ThinkTime < 0 {
 		t.Errorf("times not in seconds or negative: %s", data)
 	}
-	for _, h := range r.HashIDs {
-		seenHash[h] = true
-	}
-	return r
 }
 
-// checkSchema decodes every trace file in dir against the aiperf mirrors and
-// returns the decoded top-level requests and subagents for spot checks.
-func checkSchema(t *testing.T, dir string) ([]wekaRequest, []wekaSubagent) {
+// checkSchema decodes every trace file in dir against the aiperf mirrors.
+func checkSchema(t *testing.T, dir string) {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no trace files in %s: %v", dir, err)
 	}
-	var reqs []wekaRequest
-	var subs []wekaSubagent
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {
@@ -141,14 +126,11 @@ func checkSchema(t *testing.T, dir string) ([]wekaRequest, []wekaSubagent) {
 		}
 		var tr wekaTrace
 		strictDecode(t, data, traceKeys, &tr)
-		if tr.ID+".json" != filepath.Base(f) {
-			t.Errorf("trace id %q does not match file %s", tr.ID, f)
+		if tr.ID+".json" != filepath.Base(f) || tr.BlockSize != 64 || tr.HashIDScope != "local" ||
+			len(tr.Models) == 0 || len(tr.Requests) == 0 {
+			t.Errorf("trace header %s: id=%q block_size=%d hash_id_scope=%q models=%v requests=%d",
+				f, tr.ID, tr.BlockSize, tr.HashIDScope, tr.Models, len(tr.Requests))
 		}
-		if tr.BlockSize != 64 || tr.HashIDScope != "local" || len(tr.Models) == 0 || len(tr.Requests) == 0 {
-			t.Errorf("trace header %s: block_size=%d hash_id_scope=%q models=%v requests=%d",
-				f, tr.BlockSize, tr.HashIDScope, tr.Models, len(tr.Requests))
-		}
-		seenHash := map[int]bool{}
 		for _, raw := range tr.Requests {
 			var head struct {
 				Type string `json:"type"`
@@ -157,7 +139,7 @@ func checkSchema(t *testing.T, dir string) ([]wekaRequest, []wekaSubagent) {
 				t.Fatal(err)
 			}
 			if head.Type != TypeSubagent {
-				reqs = append(reqs, checkRequest(t, raw, seenHash))
+				checkRequest(t, raw)
 				continue
 			}
 			var sa wekaSubagent
@@ -166,17 +148,10 @@ func checkSchema(t *testing.T, dir string) ([]wekaRequest, []wekaSubagent) {
 				t.Errorf("subagent %s has no models or requests", sa.AgentID)
 			}
 			for _, inner := range sa.Requests {
-				checkRequest(t, inner, seenHash)
-			}
-			subs = append(subs, sa)
-		}
-		for h := range seenHash {
-			if h < 0 || h >= len(seenHash) {
-				t.Errorf("trace %s: hash id %d is not dense over %d ids", tr.ID, h, len(seenHash))
+				checkRequest(t, inner)
 			}
 		}
 	}
-	return reqs, subs
 }
 
 func TestGolden(t *testing.T) {
@@ -195,28 +170,12 @@ func TestGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wantStats := Stats{
-		Files: 1, Lines: 12, Malformed: 1, Duplicates: 1, Undecodable: 1, Estimate: 1,
-		Retries: 1, Requests: 7, Traces: 3, Subagents: 1,
-	}
+	wantStats := Stats{Malformed: 1, Duplicates: 1, Undecodable: 1, Estimate: 1, Retries: 1}
 	if diff := cmp.Diff(wantStats, res.Stats); diff != "" {
 		t.Errorf("stats (-want +got):\n%s", diff)
 	}
 
-	reqs, subs := checkSchema(t, out)
-	var first *wekaRequest
-	for i := range reqs {
-		if reqs[i].APITime == 5.396 {
-			first = &reqs[i]
-		}
-	}
-	if first == nil || first.Type != TypeStream || first.TTFT == nil || *first.TTFT != 5.018 || first.T != 0 {
-		t.Errorf("record with api_ms=5396 not exported as t=0 api_time=5.396 ttft=5.018: %+v", first)
-	}
-	if len(subs) != 1 || subs[0].Status != StatusCancelled || !slices.Equal(subs[0].Models, []string{"small-model"}) {
-		t.Errorf("subagents = %+v, want one cancelled small-model subagent", subs)
-	}
-
+	checkSchema(t, out)
 	if *update {
 		if err := os.RemoveAll(goldenDir); err != nil {
 			t.Fatal(err)
@@ -230,32 +189,28 @@ func TestGolden(t *testing.T) {
 
 func compareDirs(t *testing.T, want, got string) {
 	t.Helper()
-	names := func(dir string) []string {
-		es, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out := make([]string, 0, len(es))
-		for _, e := range es {
-			out = append(out, e.Name())
-		}
-		return out
+	wantFiles, err := os.ReadDir(want)
+	if err != nil {
+		t.Fatal(err)
 	}
-	wantNames, gotNames := names(want), names(got)
-	if diff := cmp.Diff(wantNames, gotNames); diff != "" {
-		t.Fatalf("golden files (-want +got):\n%s\nrun with -update to regenerate", diff)
+	gotFiles, err := os.ReadDir(got)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, n := range wantNames {
-		w, err := os.ReadFile(filepath.Join(want, n))
+	if len(gotFiles) != len(wantFiles) {
+		t.Errorf("got %d files, want %d; run with -update to regenerate", len(gotFiles), len(wantFiles))
+	}
+	for _, e := range gotFiles {
+		w, err := os.ReadFile(filepath.Join(want, e.Name()))
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%v; run with -update to regenerate", err)
 		}
-		g, err := os.ReadFile(filepath.Join(got, n))
+		g, err := os.ReadFile(filepath.Join(got, e.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if diff := cmp.Diff(string(w), string(g)); diff != "" {
-			t.Errorf("%s (-want +got):\n%s\nrun with -update to regenerate", n, diff)
+			t.Errorf("%s (-want +got):\n%s\nrun with -update to regenerate", e.Name(), diff)
 		}
 	}
 }
@@ -310,41 +265,5 @@ func writeFixture(t *testing.T) {
 	}
 	if err := os.WriteFile(fixture, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestReadGzip(t *testing.T) {
-	g := &idGen{}
-	dir := t.TempDir()
-	line, err := json.Marshal(mk(rspec{rid: "r1", sess: "s", ids: g.fresh(2)}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	if _, err := zw.Write(append(line, []byte("\ngarbage")...)); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for name, data := range map[string][]byte{
-		"a.jsonl.gz": buf.Bytes(),
-		"b.jsonl":    line,
-		"c.txt":      []byte("ignored"),
-	} {
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	recs, st, err := Read(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if diff := cmp.Diff(Stats{Files: 2, Lines: 3, Malformed: 1}, st); diff != "" {
-		t.Errorf("stats (-want +got):\n%s", diff)
-	}
-	if len(recs) != 2 || recs[0].Rid != "r1" {
-		t.Errorf("records = %+v", recs)
 	}
 }

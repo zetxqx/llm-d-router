@@ -36,13 +36,13 @@ func main() {
 }
 
 func run(args []string) error {
-	opts := export.DefaultOptions()
+	var opts export.Options
 	fs := pflag.NewFlagSet("weka-export", pflag.ContinueOnError)
-	in := fs.String("in", "", "Directory with recorder *.jsonl and *.jsonl.gz files.")
+	in := fs.String("in", "", "Directory with recorder *.jsonl files.")
 	out := fs.String("out", "", "Directory to write one <trace-id>.json WekaTrace file per trace.")
 	sidecar := fs.String("sidecar", "", "Path of the per-request sidecar JSONL. Empty skips it.")
 	fs.BoolVar(&opts.AllowEstimate, "allow-estimate", false, "Export records whose block ids come from an approximate tokenizer.")
-	fs.DurationVar(&opts.SkewTol, "skew-tol", opts.SkewTol, "Clock skew tolerance between replicas for lineage reconstruction.")
+	fs.DurationVar(&opts.SkewTol, "skew-tol", export.DefaultSkewTol, "Clock skew tolerance between replicas for lineage reconstruction.")
 	fs.StringVar(&opts.Seed, "seed", "", "Derive trace ids deterministically from this seed. Empty uses random ids.")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -66,6 +66,6 @@ func run(args []string) error {
 			return err
 		}
 	}
-	fmt.Println("weka-export:", res.Stats)
+	fmt.Printf("weka-export: traces=%d requests=%d %+v\n", len(res.Traces), len(res.Sidecar), res.Stats)
 	return nil
 }

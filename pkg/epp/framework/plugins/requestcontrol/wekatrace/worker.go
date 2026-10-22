@@ -20,10 +20,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"hash"
 	"math"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/blake2s"
@@ -31,141 +32,100 @@ import (
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/prefixhash"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/wekatrace/record"
 )
 
 // PRF domain separators.
 const (
-	domainSession = "sid"
-	domainBlocks  = "blk"
-	domainRequest = "rid"
-	domainReplica = "rep"
-	domainEndpt   = "ep"
-	domainModel   = "model"
+	domainSession  = "sid"
+	domainBlocks   = "blk"
+	domainRequest  = "rid"
+	domainReplica  = "rep"
+	domainEndpoint = "ep"
+	domainModel    = "model"
 )
 
-// sampleBuckets is the resolution of the sampling decision.
-const sampleBuckets = 10000
+const (
+	sampleBuckets = 10000
+	flushBudget   = 20 * time.Second
+)
+
+// counters are process-local and exposed through DumpState.
+type counters struct {
+	written, droppedQueue, droppedSink, droppedDisk, keyframes, panics atomic.Int64
+}
+
+func (c *counters) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]int64{
+		"written": c.written.Load(), "droppedQueue": c.droppedQueue.Load(), "droppedSink": c.droppedSink.Load(),
+		"droppedDisk": c.droppedDisk.Load(), "keyframes": c.keyframes.Load(), "panics": c.panics.Load(),
+	})
+}
 
 // job is the end-of-stream snapshot handed to the worker.
 type job struct {
-	st       *requestState
-	usage    usageSnapshot
-	events   int
-	cause    requestcontrol.TerminationCause
-	timing   requestcontrol.ResponseTiming
-	status   int
-	bytes    int64
-	hasTimer bool
+	st    *requestState
+	resp  requestcontrol.Response
+	bytes int64
 }
 
-type usageSnapshot struct {
-	prompt     int
-	completion int
-	cached     *int
-}
-
-func newJob(st *requestState, resp *requestcontrol.Response) *job {
-	j := &job{st: st, events: resp.StreamedEvents, cause: resp.TerminationCause}
-	j.usage.prompt = resp.Usage.PromptTokens
-	j.usage.completion = resp.Usage.CompletionTokens
-	if d := resp.Usage.PromptTokenDetails; d != nil {
-		c := d.CachedTokens
-		j.usage.cached = &c
-	}
-	if resp.Timing != nil {
-		j.timing = *resp.Timing
-		j.hasTimer = true
-	}
-	if s, err := strconv.Atoi(resp.Headers[":status"]); err == nil {
-		j.status = s
-	}
-	j.bytes = 512
-	if body := st.request.Body; body != nil && body.TokenizedRequest != nil {
-		j.bytes += int64(body.TokenizedRequest.TokenCount()) * 4
-	}
-	return j
-}
-
-// sink is where encoded records go. gen identifies the current file; write
-// reports whether the record became durable in that file.
-type sink interface {
-	gen() uint64
-	// maybeRotate starts a new file when the current one is full and reports
-	// whether the generation changed.
-	maybeRotate() bool
-	write(line []byte) error
-	diskFull() bool
-	close() error
-}
-
+// worker owns the sink and the delta state; only its goroutine touches them.
 type worker struct {
-	cfg          resolvedConfig
-	key          []byte
-	kid          string
-	rep          string
-	sink         sink
-	stats        *stats
-	queue        chan *job
-	tokenBackend func() string
-	backend      string
-	lru          *sessionLRU
-	ctx          context.Context
+	cfg        settings
+	key        [blake2s.Size]byte
+	rep        string
+	sink       *fileSink
+	lru        *sessionLRU
+	stats      *counters
+	queue      chan *job
+	queueBytes atomic.Int64
+	backendFn  func() string
+	backend    string
+	ctx        context.Context
 }
 
-func newWorker(ctx context.Context, cfg resolvedConfig, key []byte, s sink, st *stats, tokenBackend func() string) *worker {
+func newWorker(ctx context.Context, cfg settings, rawKey []byte, sink *fileSink, stats *counters, backend func() string) *worker {
 	w := &worker{
-		cfg:          cfg,
-		key:          key,
-		kid:          cfg.keyID,
-		sink:         s,
-		stats:        st,
-		queue:        make(chan *job, 4096),
-		tokenBackend: tokenBackend,
-		lru:          newSessionLRU(cfg.lruBytes),
-		ctx:          ctx,
+		cfg:       cfg,
+		key:       blake2s.Sum256(rawKey), // normalizes any key length to the PRF key size
+		sink:      sink,
+		lru:       newSessionLRU(lruBytes),
+		stats:     stats,
+		queue:     make(chan *job, 4096),
+		backendFn: backend,
+		ctx:       ctx,
 	}
 	w.rep = w.prfHex(domainReplica, podName())
 	go w.run()
 	return w
 }
 
-// sampled decides per session (or per request when sessionless) so that every
+// sampled decides per session (per request when sessionless) so that every
 // replica holding the same key makes the same choice.
 func (w *worker) sampled(sessionID, requestID string) bool {
-	if w.cfg.sampleRate >= 1 {
-		return true
-	}
-	if w.cfg.sampleRate <= 0 {
-		return false
-	}
 	id, domain := sessionID, domainSession
 	if id == "" {
 		id, domain = requestID, domainRequest
 	}
-	return w.prf64(domain, id)%sampleBuckets < uint64(w.cfg.sampleRate*sampleBuckets)
+	return float64(w.prf64(domain, id)%sampleBuckets) < w.cfg.sampleRate*sampleBuckets
 }
 
-// enqueue never blocks the caller; it drops when the byte budget is exhausted.
-func (w *worker) enqueue(j *job) {
-	if w.stats.queueBytes.Add(j.bytes) > w.cfg.queueBytes {
-		w.stats.queueBytes.Add(-j.bytes)
-		w.dropQueue(j)
-		return
+// enqueue never blocks; it drops when the byte budget or the queue is full.
+// Later deltas stay decodable because the LRU only holds written records.
+func (w *worker) enqueue(st *requestState, resp *requestcontrol.Response) {
+	j := &job{st: st, resp: *resp, bytes: 512}
+	if tr := st.request.Body; tr != nil && tr.TokenizedRequest != nil {
+		j.bytes += int64(tr.TokenizedRequest.TokenCount()) * 4
 	}
-	select {
-	case w.queue <- j:
-	default:
-		w.stats.queueBytes.Add(-j.bytes)
-		w.dropQueue(j)
+	if w.queueBytes.Add(j.bytes) <= queueBytes {
+		select {
+		case w.queue <- j:
+			return
+		default:
+		}
 	}
-}
-
-// dropQueue only counts: the LRU holds the last written record, so later
-// deltas stay decodable without the dropped one.
-func (w *worker) dropQueue(_ *job) {
+	w.queueBytes.Add(-j.bytes)
 	w.stats.droppedQueue.Add(1)
 }
 
@@ -173,41 +133,32 @@ func (w *worker) run() {
 	defer func() { _ = w.sink.close() }()
 	for {
 		select {
+		case j := <-w.queue:
+			w.process(j)
 		case <-w.ctx.Done():
-			w.drain(time.Now().Add(20 * time.Second))
-			return
-		case j := <-w.queue:
-			w.processSafe(j)
-		}
-	}
-}
-
-// drain writes what is already queued until deadline.
-func (w *worker) drain(deadline time.Time) {
-	for time.Now().Before(deadline) {
-		select {
-		case j := <-w.queue:
-			w.processSafe(j)
-		default:
+			for deadline := time.Now().Add(flushBudget); time.Now().Before(deadline); {
+				select {
+				case j := <-w.queue:
+					w.process(j)
+				default:
+					return
+				}
+			}
 			return
 		}
 	}
-}
-
-func (w *worker) processSafe(j *job) {
-	defer w.stats.queueBytes.Add(-j.bytes)
-	defer func() {
-		if v := recover(); v != nil {
-			w.stats.workerPanics.Add(1)
-			log.FromContext(w.ctx).Error(fmt.Errorf("%v", v), "Recorder worker panicked")
-		}
-	}()
-	w.process(j)
 }
 
 func (w *worker) process(j *job) {
+	defer w.queueBytes.Add(-j.bytes)
+	defer func() {
+		if v := recover(); v != nil {
+			w.stats.panics.Add(1)
+			log.FromContext(w.ctx).Error(fmt.Errorf("%v", v), "Recorder worker panicked")
+		}
+	}()
 	if w.backend == "" {
-		w.backend = w.tokenBackend()
+		w.backend = w.backendFn()
 	}
 	if w.sink.maybeRotate() {
 		w.lru.reset()
@@ -216,11 +167,10 @@ func (w *worker) process(j *job) {
 		w.stats.droppedDisk.Add(1)
 		return
 	}
-
 	rec, sessKey, fullIDs := w.encode(j)
-	line, err := jsonLine(rec)
+	line, err := json.Marshal(rec)
 	if err == nil {
-		err = w.sink.write(line)
+		err = w.sink.write(append(line, '\n'))
 	}
 	if err != nil {
 		w.stats.droppedSink.Add(1)
@@ -229,7 +179,6 @@ func (w *worker) process(j *job) {
 		return
 	}
 	w.stats.written.Add(1)
-	w.stats.bytesWritten.Add(int64(len(line)))
 	if rec.Kf {
 		w.stats.keyframes.Add(1)
 	}
@@ -238,45 +187,65 @@ func (w *worker) process(j *job) {
 	}
 }
 
-// encode builds the record and returns the LRU key and full-block ids to
-// commit after a successful write.
+// encode builds the record and returns the LRU key and the full-block ids to
+// commit once the record is written.
 func (w *worker) encode(j *job) (*record.Record, string, []uint64) {
-	st := j.st
-	req := st.request
+	st, req, resp := j.st, j.st.request, &j.resp
 	rec := &record.Record{
 		V:          record.Version,
-		Kid:        w.kid,
+		Kid:        w.cfg.keyID,
 		Rid:        w.prfHex(domainRequest, req.RequestID),
 		Rep:        w.rep,
-		Gen:        w.sink.gen(),
-		Model:      w.model(req.TargetModel),
+		Gen:        w.sink.generation,
+		Model:      req.TargetModel,
 		TokBackend: w.backend,
-		Cause:      string(j.cause),
-		Status:     j.status,
+		PromptTok:  resp.Usage.PromptTokens,
+		Events:     resp.StreamedEvents,
+		Cause:      string(resp.TerminationCause),
 		Profile:    st.profile,
-		Events:     j.events,
+		UsageSrc:   record.UsageSrcNone,
+	}
+	if !w.cfg.modelAllowlist[req.TargetModel] {
+		rec.Model = "model-" + w.prfHex(domainModel, req.TargetModel)
 	}
 	if st.endpoint != "" {
-		rec.Ep = w.prfHex(domainEndpt, st.endpoint)
+		rec.Ep = w.prfHex(domainEndpoint, st.endpoint)
 	}
 	if req.Body != nil {
-		rec.Stream = req.Body.Stream
-		rec.MaxTokens = req.Body.MaxOutputTokens
+		rec.Stream, rec.MaxTokens = req.Body.Stream, req.Body.MaxOutputTokens
+	}
+	rec.Status, _ = strconv.Atoi(resp.Headers[":status"])
+	if d := resp.Usage.PromptTokenDetails; d != nil {
+		rec.CachedTok = ptr(d.CachedTokens)
+	}
+	switch {
+	case resp.Usage.CompletionTokens > 0:
+		rec.OutTok, rec.UsageSrc = resp.Usage.CompletionTokens, record.UsageSrcServer
+	case resp.StreamedEvents > 0:
+		rec.OutTok, rec.UsageSrc = resp.StreamedEvents, record.UsageSrcEvents
+	}
+	if t := resp.Timing; t != nil {
+		rec.ArrMs = t.RequestReceived.UnixMilli()
+		if res := w.cfg.arrivalResolutionMs; res > 0 {
+			rec.ArrMs -= rec.ArrMs % res
+		}
+		rec.APIMs = t.Completed.Sub(t.RequestReceived).Milliseconds()
+		if rec.Stream && !t.FirstByte.IsZero() {
+			rec.TTFTMs = ptr(t.FirstByte.Sub(t.RequestReceived).Milliseconds())
+		}
+		if t.FlowControlAdmitted {
+			rec.QueueMs = ptr(t.FlowQueueWait.Milliseconds())
+		}
 	}
 
-	blkScope := "r:" + req.RequestID
-	sessKey := ""
+	// Block ids are keyed per session so equal content in two sessions maps to
+	// unrelated ids; sessionless requests get a per-request key.
+	keyScope, sessKey := "r:"+req.RequestID, ""
 	if st.sessionID != "" {
-		s := w.prfHex(domainSession, st.sessionID)
-		rec.Sess = &s
-		sessKey = s
-		blkScope = "s:" + st.sessionID
+		sessKey = w.prfHex(domainSession, st.sessionID)
+		rec.Sess, keyScope = &sessKey, "s:"+st.sessionID
 	}
-
-	w.fillTiming(rec, j)
-	w.fillUsage(rec, j)
-
-	ids, hashedTokens := w.blockIDs(req, blkScope)
+	ids, hashedTokens := w.blockIDs(j, keyScope)
 	if rec.PromptTok == 0 {
 		rec.PromptTok = hashedTokens
 	}
@@ -284,105 +253,50 @@ func (w *worker) encode(j *job) (*record.Record, string, []uint64) {
 	fullIDs := ids[:hashedTokens/record.BlockSizeTokens]
 
 	n := 0
-	if sessKey != "" {
-		if prev, ok := w.lru.get(sessKey); ok {
-			n = commonPrefix(prev, fullIDs)
-		}
+	if prev, ok := w.lru.get(sessKey); ok {
+		n = commonPrefix(prev, fullIDs)
 	}
 	if n == 0 {
 		rec.Kf = true
-		rec.New = record.EncodeIDs(ids)
 	} else {
 		rec.Anchor = &record.Anchor{N: n, H: record.HexID(ids[n-1])}
-		rec.New = record.EncodeIDs(ids[n:])
 	}
-	return rec, sessKey, append([]uint64(nil), fullIDs...)
-}
-
-func (w *worker) fillTiming(rec *record.Record, j *job) {
-	if !j.hasTimer {
-		return
-	}
-	t := j.timing
-	arr := t.RequestReceived.UnixMilli()
-	if res := w.cfg.arrivalResolutionMs; res > 0 {
-		arr = arr / res * res
-	}
-	rec.ArrMs = arr
-	rec.APIMs = t.Completed.Sub(t.RequestReceived).Milliseconds()
-	if rec.Stream && !t.FirstByte.IsZero() {
-		v := t.FirstByte.Sub(t.RequestReceived).Milliseconds()
-		rec.TTFTMs = &v
-	}
-	if t.FlowControlAdmitted {
-		v := t.FlowQueueWait.Milliseconds()
-		rec.QueueMs = &v
-	}
-}
-
-func (w *worker) fillUsage(rec *record.Record, j *job) {
-	rec.PromptTok = j.usage.prompt
-	rec.CachedTok = j.usage.cached
-	switch {
-	case j.usage.completion > 0:
-		rec.OutTok = j.usage.completion
-		rec.UsageSrc = record.UsageSrcServer
-	case j.events > 0:
-		rec.OutTok = j.events
-		rec.UsageSrc = record.UsageSrcEvents
-	default:
-		rec.UsageSrc = record.UsageSrcNone
-	}
+	rec.New = record.EncodeIDs(ids[n:])
+	return rec, sessKey, fullIDs
 }
 
 // blockIDs hashes the first prompt in 64-token blocks without a cap and maps
-// each chain hash through a keyed PRF whose key is derived from keyScope, so
-// ids are comparable only within one session.
-func (w *worker) blockIDs(req *fwksched.InferenceRequest, keyScope string) ([]uint64, int) {
-	hashes, tokens := prefixhash.GetBlockHashesWithPromptTokens(w.ctx, req, record.BlockSizeTokens, math.MaxInt)
-	if len(hashes) == 0 || len(tokens) == 0 {
+// each chain hash through a PRF keyed by keyScope.
+func (w *worker) blockIDs(j *job, keyScope string) ([]uint64, int) {
+	hashes, tokens := prefixhash.GetBlockHashesWithPromptTokens(w.ctx, j.st.request, record.BlockSizeTokens, math.MaxInt)
+	if len(hashes) == 0 {
 		return nil, 0
 	}
-	h := w.mac(w.prf(domainBlocks, keyScope))
+	scoped := w.prf(domainBlocks, keyScope)
 	ids := make([]uint64, len(hashes[0]))
 	var in [8]byte
-	sum := make([]byte, 0, blake2s.Size)
 	for i, c := range hashes[0] {
-		h.Reset()
 		binary.LittleEndian.PutUint64(in[:], uint64(c))
-		h.Write(in[:])
-		ids[i] = binary.LittleEndian.Uint64(h.Sum(sum[:0])[:8])
+		ids[i] = binary.LittleEndian.Uint64(mac(scoped, in[:]))
 	}
 	return ids, tokens[0]
 }
 
-func (w *worker) model(name string) string {
-	if _, ok := w.cfg.modelAllowlist[name]; ok {
-		return name
+// mac is keyed BLAKE2s-256; key is always 32 bytes, so New256 cannot fail.
+func mac(key []byte, parts ...[]byte) []byte {
+	h, _ := blake2s.New256(key)
+	for _, p := range parts {
+		h.Write(p)
 	}
-	return "model-" + w.prfHex(domainModel, name)
-}
-
-func (w *worker) mac(key []byte) hash.Hash {
-	h, err := blake2s.New256(key)
-	if err != nil {
-		// blake2s rejects keys longer than 32 bytes; hash such keys down first.
-		sum := blake2s.Sum256(key)
-		h, _ = blake2s.New256(sum[:])
-	}
-	return h
-}
-
-func (w *worker) prf(domain, value string) []byte {
-	h := w.mac(w.key)
-	h.Write([]byte(domain))
-	h.Write([]byte{0})
-	h.Write([]byte(value))
 	return h.Sum(nil)
 }
 
+func (w *worker) prf(domain, value string) []byte {
+	return mac(w.key[:], []byte(domain), []byte{0}, []byte(value))
+}
+
 func (w *worker) prf64(domain, value string) uint64 {
-	return binary.LittleEndian.Uint64(w.prf(domain, value)[:8])
+	return binary.LittleEndian.Uint64(w.prf(domain, value))
 }
 
 func (w *worker) prfHex(domain, value string) string {
@@ -398,3 +312,5 @@ func commonPrefix(a, b []uint64) int {
 	}
 	return n
 }
+
+func ptr[T any](v T) *T { return &v }

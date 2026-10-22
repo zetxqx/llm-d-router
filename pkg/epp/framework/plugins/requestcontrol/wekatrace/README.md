@@ -54,8 +54,6 @@ default.
 | `sink.fileBytes` | quantity | No | `64Mi` | File size before starting a new file. |
 | `sink.diskHighWatermark` | quantity | No | `900Mi` | Directory size above which new records are dropped. |
 | `sink.stdout` | bool | No | `false` | Also write records to stdout (dogfood only). |
-| `queueMaxBytes` | quantity | No | `64Mi` | Pending work budget, including referenced token slices. |
-| `lruMaxBytes` | quantity | No | `64Mi` | Per-session delta state budget. |
 
 ```yaml
 apiVersion: llm-d.ai/v1
@@ -69,5 +67,6 @@ plugins:
       sampleRate: 0.1
 ```
 
-Counters (written, dropped by reason, keyframes, panics, queue bytes) are
-exposed through the plugin's `DumpState`.
+Pending work (including referenced token slices) and per-session delta state
+are each bounded to 64 MiB. Counters (written, dropped by reason, keyframes,
+panics) are exposed through the plugin's `DumpState`.
