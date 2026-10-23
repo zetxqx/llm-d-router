@@ -18,6 +18,8 @@ limitations under the License.
 package requestcontrol
 
 import (
+	"time"
+
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -72,7 +74,26 @@ type Response struct {
 	StreamedEvents int
 	// TerminationCause labels how the stream ended.
 	TerminationCause TerminationCause
+	// Timing carries handler-stamped lifecycle timestamps. It is non-nil on every EndOfStream
+	// call, including the abort path, and nil otherwise. Plugins cannot derive these from their
+	// own clocks because intermediate chunks reach them through an asynchronous queue.
+	Timing *ResponseTiming
 	// DynamicMetadata is a map of metadata that can be passed to the Envoy. It is populated into the dynamic
 	// metadata when processing ProcessingResponse_RequestHeaders.
 	DynamicMetadata *structpb.Struct
+}
+
+// ResponseTiming holds the handler's view of a request's lifecycle.
+type ResponseTiming struct {
+	// RequestReceived is when the EPP received the request headers.
+	RequestReceived time.Time
+	// FirstByte is when the first non-empty response body bytes arrived; zero if none did.
+	FirstByte time.Time
+	// Completed is when the response finished, or when the director observed the abort.
+	Completed time.Time
+	// FlowControlAdmitted reports whether flow control processed the request.
+	FlowControlAdmitted bool
+	// FlowQueueWait is the time spent in flow control admission; meaningful only when
+	// FlowControlAdmitted is true.
+	FlowQueueWait time.Duration
 }
