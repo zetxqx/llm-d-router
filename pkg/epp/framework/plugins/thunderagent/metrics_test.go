@@ -28,13 +28,14 @@ import (
 	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
-// The ledger gauges are computed at scrape time, so they follow the sweep with
-// no request in between.
+// The gauges are computed at scrape time, so they follow registry eviction
+// with no request in between.
 func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 	a := newTestAgent(testConfig())
 	reg := prometheus.NewPedanticRegistry()
 	require.NoError(t, a.metrics.register(reg))
-	runTurn(t, a, "s1", schedEndpoint("pod-a", 16, 100), 400, 300)
+	registryOf(a).UpsertEndpoint(podID("pod-a"), func() int64 { return 1600 })
+	seed(a, "s1", "pod-a", 300)
 
 	require.Equal(t, map[string]float64{
 		`endpoint_capacity_tokens{endpoint="default/pod-a"}`:    1600,
@@ -44,11 +45,8 @@ func TestLedgerGaugesWithoutTraffic(t *testing.T) {
 		`sessions{state="running"}`:                             0,
 	}, gather(t, reg))
 
-	a.mgr.mu.Lock()
-	a.mgr.sessions["s1"].lastActivity = time.Now().Add(-2 * a.mgr.ttl)
-	a.mgr.endpoints["default/pod-a"].updatedAt = time.Now().Add(-2 * endpointStaleAfter)
-	a.mgr.mu.Unlock()
-	a.mgr.sweep(time.Now())
+	registryOf(a).EvictIdle(now(a).Add(2*time.Hour), time.Hour)
+	registryOf(a).RemoveEndpoint(podID("pod-a"))
 
 	require.Equal(t, map[string]float64{
 		`sessions{state="idle"}`:    0,
@@ -63,7 +61,8 @@ func TestSecondInstanceRegistrationFails(t *testing.T) {
 	reg := prometheus.NewPedanticRegistry()
 	first := newTestAgent(testConfig())
 	require.NoError(t, first.metrics.register(reg))
-	runTurn(t, first, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
+	primeFitView(first, "pod-a")
+	seed(first, "s1", "pod-a", 300)
 
 	second := newTestAgent(testConfig())
 	require.Error(t, second.metrics.register(reg))

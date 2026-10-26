@@ -96,7 +96,17 @@ func (r *InferenceRequest) PutAttribute(key fwkplugin.DataKey, value any) {
 	r.attributes.Store(key, value)
 }
 
+// DynamicRequestAttribute is a request attribute whose value is resolved by
+// calling Get on every read, mirroring datalayer.DynamicAttribute for endpoint
+// attributes. A producer stores it once, typically in RequestHeader, so a
+// request that waits in a flow-control queue still reads current state at
+// admission, scheduling and PreRequest. A nil result reads as absent.
+type DynamicRequestAttribute struct {
+	Get func() any
+}
+
 // GetAttribute returns the value stored at key, or nil and false if absent.
+// A DynamicRequestAttribute is resolved before it is returned.
 // A read the request's scope rejects resolves as absent.
 // Prefer ReadRequestAttribute for type-safe access.
 func (r *InferenceRequest) GetAttribute(key fwkplugin.DataKey) (any, bool) {
@@ -106,7 +116,21 @@ func (r *InferenceRequest) GetAttribute(key fwkplugin.DataKey) (any, bool) {
 	if r.attributes == nil {
 		return nil, false
 	}
-	return r.attributes.Load(key)
+	v, ok := r.attributes.Load(key)
+	if !ok {
+		return nil, false
+	}
+	if dynamic, isDynamic := v.(*DynamicRequestAttribute); isDynamic {
+		if dynamic == nil || dynamic.Get == nil {
+			return nil, false
+		}
+		resolved := dynamic.Get()
+		if resolved == nil {
+			return nil, false
+		}
+		return resolved, true
+	}
+	return v, true
 }
 
 // AttributeKeys returns the keys currently present in the request's attribute store.

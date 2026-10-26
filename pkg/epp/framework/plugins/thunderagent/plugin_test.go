@@ -21,46 +21,59 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/types"
 
 	eppdatalayer "github.com/llm-d/llm-d-router/pkg/epp/datalayer"
-	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 	"github.com/llm-d/llm-d-router/test/utils"
 )
 
-// Agent identity is a required input, so configuration loading fails without
-// an identity provider.
+var sessionStateDefaults = map[string]string{
+	sessionstate.SessionStateDataKey.String(): sessionstate.SessionStateProducerType,
+}
+
+var sessionStateFactories = map[string]fwkplugin.FactoryFunc{
+	sessionstate.SessionStateProducerType: sessionstate.Factory,
+}
+
+// Agent identity is a required input with no default producer, so
+// configuration loading fails without an identity provider.
 func TestAgentIdentityIsARequiredDependency(t *testing.T) {
 	a := newTestAgent(testConfig())
 	handle := fwkplugin.NewEppHandle(context.Background(), nil)
 	handle.AddPlugin(a.TypedName().Name, a)
 
-	err := eppdatalayer.CreateMissingDataProducers(context.Background(),
-		map[string]string{}, map[string]fwkplugin.FactoryFunc{}, handle)
+	err := eppdatalayer.CreateMissingDataProducers(context.Background(), sessionStateDefaults, sessionStateFactories, handle)
 	require.ErrorIs(t, err, eppdatalayer.ErrNoDefaultProducer)
 	require.ErrorContains(t, err, agentidentity.AgentIdentityKey.String())
 }
 
-// Factory starts the idle session sweep for the handle's lifetime.
-func TestFactoryStartsSweep(t *testing.T) {
+// Session state is a required input: a session-state-producer is created when
+// none is configured, and the plugin resolves its registry from the handle on
+// first use.
+func TestSessionStateProducerIsAutoCreated(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	params := json.NewDecoder(strings.NewReader(`{"evictionTtlSeconds": 0.01, "evictionSweepSeconds": 0.01, "headWaitStarvationMs": 0}`))
-	p, err := Factory("thunder", params, utils.NewTestHandle(ctx))
+	handle := utils.NewTestHandle(ctx)
+	p, err := Factory("thunder", nil, handle)
 	require.NoError(t, err)
 	a := p.(*ThunderAgent)
+	handle.AddPlugin(a.TypedName().Name, a)
+	identity, err := agentidentity.PluginFactory("agent-identity", nil, handle)
+	require.NoError(t, err)
+	handle.AddPlugin(identity.TypedName().Name, identity)
 
-	runTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
-	require.Eventually(t, func() bool {
-		_, ok := sessionOf(a, "s1")
-		return !ok
-	}, 5*time.Second, 10*time.Millisecond)
+	require.Nil(t, a.sessions(), "no producer yet")
+	require.NoError(t, eppdatalayer.CreateMissingDataProducers(ctx, sessionStateDefaults, sessionStateFactories, handle))
+	producer, err := fwkplugin.PluginByType[*sessionstate.Producer](handle, sessionstate.SessionStateProducerType)
+	require.NoError(t, err)
+	require.Same(t, producer.Registry(), a.sessions())
+
+	_, err = eppdatalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+	require.NoError(t, err)
 }
 
 func TestFactoryRejectsInvalidSweepInterval(t *testing.T) {
@@ -68,13 +81,22 @@ func TestFactoryRejectsInvalidSweepInterval(t *testing.T) {
 	require.ErrorContains(t, err, "evictionSweepSeconds")
 }
 
+// Session retention moved to the session-state-producer; the former TTL
+// parameter is still accepted under strict decoding so existing
+// configurations load.
+func TestFactoryAcceptsDeprecatedEvictionTTL(t *testing.T) {
+	_, err := Factory("thunder", fwkplugin.StrictDecoder(json.RawMessage(`{"evictionTtlSeconds": 3600}`)), nil)
+	require.NoError(t, err)
+}
+
 // DumpState reports counts and per-endpoint totals but no session ids.
 func TestDumpState(t *testing.T) {
 	a := newTestAgent(testConfig())
-	runTurn(t, a, "secret-session", schedEndpoint("pod-a", 0, 0), 400, 300)
-	_ = startTurn(t, a, "other", schedEndpoint("pod-a", 0, 0), 800)
-	runTurn(t, a, "paused", schedEndpoint("pod-a", 0, 0), 400, 200)
-	pause(a, "paused")
+	primeFitView(a, "pod-a")
+	seed(a, "secret-session", "pod-a", 300)
+	startTurn(a, "other", "pod-a", 800)
+	seed(a, "paused", "pod-a", 200)
+	pause(t, a, "paused")
 
 	raw, err := a.DumpState()
 	require.NoError(t, err)
@@ -87,52 +109,7 @@ func TestDumpState(t *testing.T) {
 		IdleSessions:    1,
 		PausedSessions:  1,
 		Endpoints: map[string]endpointDump{
-			"default/pod-a": {WorkingSetTokens: 500, CapacityTokens: 1000},
+			podID("pod-a"): {WorkingSetTokens: 500, CapacityTokens: 1000},
 		},
 	}, got)
-}
-
-// A delete event drops the endpoint and unbinds its sessions, which keep
-// their footprint; add or update events leave the ledger alone.
-func TestExtractEndpointDelete(t *testing.T) {
-	a := newTestAgent(testConfig())
-	runTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
-	ep := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "pod-a"}}, nil)
-
-	require.NoError(t, a.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventAddOrUpdate, Endpoint: ep}))
-	require.Equal(t, float64(300), endpointTokens(a, "default/pod-a"))
-
-	require.NoError(t, a.Extract(context.Background(), fwkdl.EndpointEvent{Type: fwkdl.EventDelete, Endpoint: ep}))
-	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
-	s, ok := sessionOf(a, "s1")
-	require.True(t, ok)
-	require.Nil(t, s.endpoint)
-	require.Equal(t, int64(300), s.committedTokens)
-}
-
-// Removing a pod through the datalayer runtime reaches the ledger.
-func TestRuntimeReleaseEndpointRemovesEndpoint(t *testing.T) {
-	a := newTestAgent(testConfig())
-	runtime := eppdatalayer.NewRuntime(0)
-	require.NoError(t, a.RegisterDependencies(runtime))
-	require.NoError(t, runtime.Configure(nil, logr.Discard()))
-
-	endpoint := runtime.NewEndpoint(context.Background(), &fwkdl.EndpointMetadata{
-		ID: types.NamespacedName{Namespace: "default", Name: "pod-a"},
-	})
-	require.NotNil(t, endpoint)
-	runTurn(t, a, "s1", schedEndpoint("pod-a", 0, 0), 400, 300)
-
-	runtime.ReleaseEndpoint(endpoint)
-	require.Equal(t, float64(-1), endpointTokens(a, "default/pod-a"))
-}
-
-// PreRequest stores each turn's estimate under inflightEstimateKey for its
-// later hooks. The data layer drops undeclared request-attribute writes and
-// fails the request, so the key must be declared.
-func TestProducesInflightEstimate(t *testing.T) {
-	a := newTestAgent(testConfig())
-	produced, ok := a.Produces()[inflightEstimateKey]
-	require.True(t, ok)
-	require.IsType(t, int64(0), produced)
 }

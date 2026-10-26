@@ -152,6 +152,20 @@ func (m *typedMockPlugin) Produce(ctx context.Context, request *fwksched.Inferen
 	return nil
 }
 
+// mockRequestHeaderProducer publishes its data in RequestHeader, so it also
+// implements PreRequest to check that the RequestHeader phase takes precedence.
+type mockRequestHeaderProducer struct {
+	mockDataProducerP
+}
+
+func (m *mockRequestHeaderProducer) RequestHeader(context.Context, *fwksched.InferenceRequest) error {
+	return nil
+}
+
+func (m *mockRequestHeaderProducer) PreRequest(context.Context, *fwksched.InferenceRequest, *fwksched.SchedulingResult) error {
+	return nil
+}
+
 type MockConsumerFairnessPolicy struct {
 	fwkfcmocks.MockFairnessPolicy
 	consumes map[fwkplugin.DataKey]any
@@ -183,6 +197,8 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Scheduling plugin.
 	consumerSchedulingPlugin := MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
+	// Request header plugin that produces data before flow control.
+	headerProducer := &mockRequestHeaderProducer{mockDataProducerP: mockDataProducerP{name: "H", produces: map[fwkplugin.DataKey]any{dkA: nil}}}
 	if _, ok := any(pluginA).(fwkrc.DataProducer); !ok {
 		t.Fatalf("pluginA should implement DataProducer")
 	}
@@ -205,6 +221,11 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 		{
 			name:        "Scheduling plugin depends on a request control plugin",
 			plugins:     []fwkplugin.Plugin{pluginA, &consumerSchedulingPlugin},
+			expectedErr: "",
+		},
+		{
+			name:        "FC depends on a request header plugin",
+			plugins:     []fwkplugin.Plugin{headerProducer, &consumerFairnessPolicyPlugin},
 			expectedErr: "",
 		},
 	}

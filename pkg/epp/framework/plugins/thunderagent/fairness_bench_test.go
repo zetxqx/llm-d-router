@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 )
@@ -30,18 +29,17 @@ import (
 func BenchmarkPickAdmittedHeads(b *testing.B) {
 	const pods, sessions, queues = 32, 2000, 64
 	a := newTestAgent(testConfig())
-	now := time.Now()
-	a.mgr.mu.Lock()
-	for i := range sessions {
-		ep := a.mgr.ensureEndpointLocked(fmt.Sprintf("default/pod-%d", i%pods), 1e9, now)
-		s := a.mgr.bindLocked(fmt.Sprintf("s%d", i), ep)
-		s.committedTokens, s.turnCount, s.lastResponseAt = 1000, 1, now
+	reg := registryOf(a)
+	for i := range pods {
+		reg.UpsertEndpoint(podID(fmt.Sprintf("pod-%d", i)), func() int64 { return 1e9 })
 	}
-	a.mgr.mu.Unlock()
+	for i := range sessions {
+		seed(a, fmt.Sprintf("s%d", i), fmt.Sprintf("pod-%d", i%pods), 1000)
+	}
 
 	qs := make([]fwkfc.FlowQueueAccessor, queues)
 	for i := range queues {
-		qs[i] = makeQueue(fmt.Sprintf("s%d", i), now, 400)
+		qs[i] = makeQueue(fmt.Sprintf("s%d", i), now(a), 400)
 	}
 	band := bandOf(qs...)
 	ctx := context.Background()

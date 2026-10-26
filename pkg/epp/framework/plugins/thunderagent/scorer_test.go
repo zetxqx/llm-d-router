@@ -23,24 +23,50 @@ import (
 	"github.com/stretchr/testify/require"
 
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate"
 )
 
 // A bound session's pod gets 1.0, every other candidate 0.0.
 func TestScorePinsBoundSession(t *testing.T) {
 	a := newTestAgent(testConfig())
-	podA := schedEndpoint("pod-a", 0, 0)
-	podB := schedEndpoint("pod-b", 0, 0)
-	runTurn(t, a, "s1", podA, 400, 300)
+	podA, podB := schedEndpoint("pod-a"), schedEndpoint("pod-b")
+	seed(a, "s1", "pod-a", 300)
 
 	scores := a.Score(context.Background(), newRequest("s1", 400), []fwksched.Endpoint{podA, podB})
 	require.Equal(t, 1.0, scores[podA])
 	require.Equal(t, 0.0, scores[podB])
 }
 
+// The scorer reads the SessionState the session-state-producer publishes on
+// the request.
+func TestScoreReadsRequestAttribute(t *testing.T) {
+	a := newThunderAgent("test", testConfig()) // no registry
+	podA, podB := schedEndpoint("pod-a"), schedEndpoint("pod-b")
+	req := newRequest("s1", 400)
+	req.PutAttribute(sessionstate.SessionStateDataKey, sessionstate.SessionState{BoundEndpoint: podID("pod-b"), TurnsTaken: 1})
+
+	scores := a.Score(context.Background(), req, []fwksched.Endpoint{podA, podB})
+	require.Equal(t, 0.0, scores[podA])
+	require.Equal(t, 1.0, scores[podB])
+}
+
+// A session Pick reserved onto a pod is pinned there before it is bound.
+func TestScorePinsReservedSession(t *testing.T) {
+	a := newTestAgent(testConfig())
+	podA, podB := schedEndpoint("pod-a"), schedEndpoint("pod-b")
+	seed(a, "s0", "pod-a", 900)
+	primeFitView(a, "pod-a", "pod-b")
+
+	q := makeQueue("s1", now(a), 2000)
+	require.Equal(t, q, pick(t, a, q))
+	scores := a.Score(context.Background(), newRequest("s1", 2000), []fwksched.Endpoint{podA, podB})
+	require.Equal(t, 1.0, scores[podB])
+}
+
 // Unknown sessions and anonymous requests get no scores.
 func TestScoreAbstains(t *testing.T) {
 	a := newTestAgent(testConfig())
-	podA := schedEndpoint("pod-a", 0, 0)
+	podA := schedEndpoint("pod-a")
 
 	require.Nil(t, a.Score(context.Background(), newRequest("unknown", 400), []fwksched.Endpoint{podA}))
 	require.Nil(t, a.Score(context.Background(), newRequest("", 400), []fwksched.Endpoint{podA}))
@@ -50,11 +76,9 @@ func TestScoreAbstains(t *testing.T) {
 // filter removed it), the scorer abstains rather than zeroing everything.
 func TestScoreAbstainsWhenBoundPodMissing(t *testing.T) {
 	a := newTestAgent(testConfig())
-	podA := schedEndpoint("pod-a", 0, 0)
-	podB := schedEndpoint("pod-b", 0, 0)
-	runTurn(t, a, "s1", podA, 400, 300)
+	seed(a, "s1", "pod-a", 300)
 
-	require.Nil(t, a.Score(context.Background(), newRequest("s1", 400), []fwksched.Endpoint{podB}))
+	require.Nil(t, a.Score(context.Background(), newRequest("s1", 400), []fwksched.Endpoint{schedEndpoint("pod-b")}))
 }
 
 func TestScorerCategory(t *testing.T) {

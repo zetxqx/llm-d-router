@@ -1354,6 +1354,65 @@ func TestStreamedEventAccumulation(t *testing.T) {
 	}
 }
 
+func TestResponseOutcomeAccumulation(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	sseHeaders := map[string]string{"content-type": "text/event-stream"}
+
+	tests := []struct {
+		name             string
+		chunks           []string
+		wantFinishReason string
+		wantHasToolCalls bool
+	}{
+		{
+			name: "tool calls persist past later chunks without tool calls",
+			chunks: []string{
+				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1"}]},"finish_reason":null}]}` + "\n",
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n",
+				`data: {"choices":[],"usage":{"prompt_tokens":1}}` + "\n" + `data: [DONE]`,
+			},
+			wantFinishReason: "tool_calls",
+			wantHasToolCalls: true,
+		},
+		{
+			name: "stop without tool calls",
+			chunks: []string{
+				`data: {"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n",
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n",
+				`data: [DONE]`,
+			},
+			wantFinishReason: "stop",
+		},
+		{
+			name: "last non-empty finish reason wins",
+			chunks: []string{
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}` + "\n",
+				`data: {"choices":[{"index":1,"delta":{},"finish_reason":"stop"}]}` + "\n",
+				`data: [DONE]`,
+			},
+			wantFinishReason: "stop",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response:          &Response{Headers: sseHeaders},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+			}
+			for i, chunk := range tt.chunks {
+				server.HandleResponseBody(ctx, reqCtx, []byte(chunk), i == len(tt.chunks)-1)
+			}
+			assert.Equal(t, tt.wantFinishReason, reqCtx.FinishReason)
+			assert.Equal(t, tt.wantHasToolCalls, reqCtx.HasToolCalls)
+		})
+	}
+}
+
 // TestGenerateResponseBodyResponses_DynamicMetadata verifies that DynamicMetadata is attached
 // to the last ProcessingResponse chunk and not to earlier chunks. This is a regression test for
 // the bug where the metadata was computed by plugins but silently dropped before reaching Envoy.

@@ -6,7 +6,9 @@ session id the `agent-identity` plugin reads from the session headers Claude
 Code, OpenCode and Codex send; other clients send a header listed in its
 `additionalSessionHeaders`. Requests with no session id are not tracked.
 `agent-identity` is a required dependency: configuration loading fails
-without it. No engine changes.
+without it. Session state comes from the `session-state-producer`, which is
+created with default parameters when the configuration does not list it. No
+engine changes.
 
 Flow control queues requests by the fairness ID, and the gate judges each
 queue by the session of its first request. Without an explicit fairness
@@ -24,24 +26,28 @@ free list and are reported as unused.
 
 ## How it works
 
-One named plugin instance fills every slot, so accounting and decisions
-cannot drift apart:
+Session accounting lives in the `session-state-producer`'s
+`SessionStateRegistry`: each session's pod binding (`BoundEndpoint`), turn
+count, and KV footprint, the larger of `CommittedTokens` (the
+`usage.total_tokens` of its last finished turn) and `InFlightTokens` (the
+prompt tokens of its turns in flight; each turn resends the history, so the
+two describe the same KV). Capacity is `block_size * num_gpu_blocks` scraped
+from the engine, with a configured fallback. When a pod leaves the pool, the
+registry unbinds its sessions; they keep their footprint and move to the pod
+that serves their next turn.
+
+One named plugin instance fills every slot, so the scorer and the gate read
+the same policy state:
 
 | Slot | Role |
 |---|---|
 | scheduling profile (`Scorer`) | pin a session to the pod that holds its KV; abstain otherwise |
-| `flowControl.saturationDetector` | refresh the per-pod ledger each dispatch cycle; always reports unsaturated, because the controller's own gate would also block admitted sessions' turns |
+| `flowControl.saturationDetector` | always reports unsaturated, because the controller's own gate would also block admitted sessions' turns |
 | `defaultPriorityBand.fairnessPolicyRef` | the admission gate |
-| request lifecycle (`PreRequest`, `ResponseBody`) | token accounting, pod binding |
 
-Ledger: each session's KV footprint is the larger of the
-`usage.total_tokens` of its last completed turn and the sum of the byte
-estimates of its turns in flight (each turn resends the history, so the two
-describe the same KV). Capacity is `block_size * num_gpu_blocks` scraped from the engine, with
-a configured fallback.
-
-When a pod leaves the pool, the plugin drops it from the ledger; its sessions
-keep their footprint and move to the pod that serves their next turn.
+The plugin keeps only its own policy state: which sessions it paused, and the
+reservation of a picked turn's room until the `session-state-producer`
+records the dispatch. Both end when the session's `TurnsTaken` advances.
 
 Gate: a pod's room is `utilThreshold * capacity` minus its working set.
 Turns of admitted sessions always dispatch. A paused session's next turn
@@ -56,7 +62,8 @@ Among the sessions that fit, admitted goes before paused before new; a
 session that fits no pod does not block the others, so smaller sessions can
 take room a larger paused one waits for. Any head waiting past
 `headWaitStarvationMs` is force-admitted. A picked session's room is
-reserved until its request reaches the pod.
+reserved until its request reaches the pod. An archived session's blocks count
+as free room.
 
 Idle sessions give up their room on demand, when a session is picked,
 longest idle first. A paused or new session that does not fit, and an
@@ -66,21 +73,21 @@ turn keeps its room, so the pod can stay over the ceiling until one passes
 the lease. A new session prefers a pod it fits without pausing anyone. A
 session that gives up its room is paused: it stops counting against the pod and its next turn must fit
 again. Sessions with a turn queued are never paused. Pausing happens only
-when a session is picked; the background sweep only drops sessions idle past
-`evictionTtlSeconds`.
+when a session is picked; the background sweep only drops pauses and
+reservations the registry has superseded.
 
 ## Scorer
 
 Referenced as a scorer in a scheduling profile, the plugin gives 1.0 to the
-pod a session is bound to in the ledger and 0.0 to the other candidates. It
-returns no scores for requests with no session id, for sessions the ledger
-does not know, and when the bound pod is not a candidate; the other scorers
-then place the request, and `PreRequest` binds the session to the picked pod.
+pod a session is reserved on or bound to and 0.0 to the other candidates. It
+returns no scores for requests with no session id, for sessions with no pod,
+and when that pod is not a candidate; the other scorers then place the
+request, and the `session-state-producer` binds the session to the picked pod.
 Its category is `Affinity`.
 
 It does the same job as `session-affinity-scorer` with the `session_id`
-strategy, with one difference: the binding comes from the ledger, so a
-session stays on the pod whose KV the ledger counts for it. Do not configure
+strategy, with one difference: the binding comes from the session-state
+registry, so a session stays on the pod whose KV the gate counts for it. Do not configure
 both in one profile.
 
 ## Configuration
@@ -94,8 +101,11 @@ parameters:
 | `utilThreshold` | `1.0` | Fit ceiling as a fraction of capacity (1.0 = 100%). |
 | `idleLeaseSeconds` | `30` | How long an idle session keeps its room against paused and new sessions. Set it to about a typical tool-call duration: shorter pauses sessions about to return, longer holds admissions behind long tool calls. |
 | `headWaitStarvationMs` | `30000` | Forced-admission backstop; 0 disables it. Keep it below the priority band's request TTL (flow control default 60 s), or the request is shed before it is force-admitted. |
-| `evictionTtlSeconds` | `3600` | Idle session state retention; must exceed `headWaitStarvationMs`. |
-| `evictionSweepSeconds` | `10` | How often the background sweep drops idle sessions. |
+| `evictionSweepSeconds` | `10` | How often the background sweep drops superseded pauses and reservations. |
+
+Idle session retention is the `session-state-producer`'s `evictionTtlSeconds`;
+keep it above `headWaitStarvationMs`, or a held session loses its state and
+re-enters as new.
 
 ## Observability
 
@@ -112,15 +122,15 @@ dumps or logs.
 
 ## Limitations
 
-- The ledger is in-process; running multiple EPP replicas splits the
+- Session state is in-process; running multiple EPP replicas splits the
   accounting.
 - Anonymous traffic (no session id) passes the gate untracked; pair the
   plugin with a general load scorer to place it.
-- There is no explicit end-of-session signal: a finished session stays in
-  the working set as an idle session until another session's turn reclaims
-  its room or the idle TTL drops it, so the working set gauge overestimates
-  by recently ended sessions. An end-of-session marker is a candidate
-  follow-up once clients can send one reliably.
-- Prefill/decode disaggregation is not supported: every pod the flow
-  controller reports enters one ledger, so a new session can be reserved
-  onto a prefill pod.
+- Clients have no way yet to archive a session (`SessionStateRegistry.Archive`
+  has no request-level trigger): a finished session stays in the working set
+  as an idle session until another session's turn reclaims its room or the
+  idle TTL drops it, so the working set gauge overestimates by recently ended
+  sessions.
+- Prefill/decode disaggregation is not supported: every pod the registry
+  knows is a placement candidate, so a new session can be reserved onto a
+  prefill pod.

@@ -149,6 +149,8 @@ type RequestContext struct {
 	RequestSize              int
 	Usage                    fwkrh.Usage
 	StreamedEvents           int
+	FinishReason             string
+	HasToolCalls             bool
 	// ResponseBodyStarted is maintained by the director for start-of-stream detection.
 	ResponseBodyStarted bool
 	Request             *Request

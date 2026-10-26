@@ -72,6 +72,32 @@ func TestReadRequestAttribute(t *testing.T) {
 	assert.Equal(t, "", mismatch)
 }
 
+func TestRequestAttributes_DynamicResolvesOnEveryRead(t *testing.T) {
+	r := &InferenceRequest{}
+	value := 1
+	r.PutAttribute(testKey("live"), &DynamicRequestAttribute{Get: func() any { return value }})
+
+	got, ok := ReadRequestAttribute[int](r, testKey("live"))
+	assert.True(t, ok)
+	assert.Equal(t, 1, got)
+
+	value = 2
+	got, ok = ReadRequestAttribute[int](r, testKey("live"))
+	assert.True(t, ok)
+	assert.Equal(t, 2, got)
+}
+
+func TestRequestAttributes_DynamicNilReadsAbsent(t *testing.T) {
+	r := &InferenceRequest{}
+	r.PutAttribute(testKey("nil-result"), &DynamicRequestAttribute{Get: func() any { return nil }})
+	r.PutAttribute(testKey("nil-getter"), &DynamicRequestAttribute{})
+
+	_, ok := r.GetAttribute(testKey("nil-result"))
+	assert.False(t, ok)
+	_, ok = r.GetAttribute(testKey("nil-getter"))
+	assert.False(t, ok)
+}
+
 func TestRequestAttributes_ZeroValueRequestIsUsable(t *testing.T) {
 	var r InferenceRequest
 
