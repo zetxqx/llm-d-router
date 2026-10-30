@@ -636,6 +636,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 
 	if endOfStream {
 		response.TerminationCause = cause
+		response.Timing = responseTiming(reqCtx)
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
 		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
@@ -662,6 +663,22 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 		}
 	}
 	return reqCtx
+}
+
+// responseTiming snapshots the handler timestamps for the end-of-stream Response. The abort
+// path reaches the director without a completion timestamp, so the director stamps it.
+func responseTiming(reqCtx *handlers.RequestContext) *fwkrc.ResponseTiming {
+	completed := reqCtx.ResponseCompleteTimestamp()
+	if completed.IsZero() {
+		completed = time.Now()
+	}
+	return &fwkrc.ResponseTiming{
+		RequestReceived:     reqCtx.RequestReceivedTimestamp,
+		FirstByte:           reqCtx.FirstByteTimestamp(),
+		Completed:           completed,
+		FlowControlAdmitted: reqCtx.FlowControlAdmitted,
+		FlowQueueWait:       reqCtx.FlowControlQueueDuration,
+	}
 }
 
 func (d *Director) loadOrCreateResponseBodyQueue(reqCtx *handlers.RequestContext) *responseBodyQueue {

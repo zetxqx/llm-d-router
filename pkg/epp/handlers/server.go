@@ -215,6 +215,14 @@ type RequestContext struct {
 	localResp       *extProcPb.ProcessingResponse
 }
 
+// FirstByteTimestamp returns when the first non-empty response body bytes arrived, or the zero
+// time if none did.
+func (r *RequestContext) FirstByteTimestamp() time.Time { return r.firstTokenTimestamp }
+
+// ResponseCompleteTimestamp returns when the response completed, or the zero time on the abort
+// path.
+func (r *RequestContext) ResponseCompleteTimestamp() time.Time { return r.responseCompleteTimestamp }
+
 // logKeyEPPRequestID is the log key for Request.ID.
 const logKeyEPPRequestID = "eppRequestID"
 

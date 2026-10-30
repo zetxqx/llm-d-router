@@ -124,6 +124,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/endpointpin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/selectivekv"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/wekatrace"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
@@ -851,6 +852,10 @@ func (r *Runner) registerInTreePlugins() {
 	// Alpha
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
 	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
+
+	// register observer plugins
+	// Alpha
+	fwkplugin.Register(wekatrace.PluginType, fwkplugin.StabilityAlpha, wekatrace.Factory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapiv1.EndpointPickerConfig, error) {
