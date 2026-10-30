@@ -132,11 +132,13 @@ func (a *ThunderAgent) Pick(ctx context.Context, band fwkfc.PriorityBandAccessor
 		}
 	}
 	paused := 0
+	var closes []closeJob
 	if best != nil {
-		paused = a.admitLocked(best, now, queued)
+		paused, closes = a.admitLocked(best, now, queued)
 	}
 	m.mu.Unlock()
 
+	a.closer.enqueue(closes...)
 	if paused > 0 {
 		a.metrics.pauses.Add(float64(paused))
 		log.FromContext(ctx).V(logutil.DEBUG).Info("Paused idle sessions to make room", "sessionClass", best.class.String(), "pausedSessions", paused)
@@ -239,31 +241,34 @@ func (a *ThunderAgent) newSessionPod(tokens float64, rooms, spare map[*endpointS
 // into the same room twice, and keeps a dispatched admitted session, no
 // longer queued and not yet in flight, from looking idle and being reclaimed.
 // Returns how many sessions it paused.
-func (a *ThunderAgent) admitLocked(best *candidate, now time.Time, queued map[string]bool) int {
+func (a *ThunderAgent) admitLocked(best *candidate, now time.Time, queued map[string]bool) (int, []closeJob) {
 	m := a.mgr
 	s := m.sessions[best.id]
-	paused := 0
+	var (
+		paused int
+		closes []closeJob
+	)
 	switch {
 	case best.class == classAdmitted:
 		if s == nil {
-			return 0 // anonymous traffic
+			return 0, nil // anonymous traffic
 		}
 		// Its current size is already counted; only the turn's growth is new.
-		paused = m.reclaimLocked(s.endpoint, now, queued, a.roomLocked(s.endpoint, now), max(best.tokens-s.size(), 0))
+		paused, closes = m.reclaimLocked(s.endpoint, now, queued, a.roomLocked(s.endpoint, now), max(best.tokens-s.size(), 0))
 	case best.fitPod != nil:
-		paused = m.reclaimLocked(best.fitPod, now, queued, a.roomLocked(best.fitPod, now), a.fitTokens(best.fitPod, best.tokens))
+		paused, closes = m.reclaimLocked(best.fitPod, now, queued, a.roomLocked(best.fitPod, now), a.fitTokens(best.fitPod, best.tokens))
 		s = m.bindLocked(best.id, best.fitPod)
 	case s == nil:
 		// A force-admitted new session that fits no pod: the scheduler
 		// places it and PreRequest binds it.
-		return 0
+		return 0, nil
 	case s.endpoint != nil:
 		// A force-admitted session that fits no pod returns to its own pod.
-		paused = m.reclaimLocked(s.endpoint, now, queued, a.roomLocked(s.endpoint, now), a.fitTokens(s.endpoint, best.tokens))
+		paused, closes = m.reclaimLocked(s.endpoint, now, queued, a.roomLocked(s.endpoint, now), a.fitTokens(s.endpoint, best.tokens))
 	}
 	s.reservedTokens = best.tokens
 	s.reservedUntil = now.Add(reservationTTL)
-	return paused
+	return paused, closes
 }
 
 // betterThan reports whether a outranks b:
