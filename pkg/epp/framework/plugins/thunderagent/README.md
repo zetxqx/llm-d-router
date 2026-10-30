@@ -83,6 +83,29 @@ strategy, with one difference: the binding comes from the ledger, so a
 session stays on the pod whose KV the ledger counts for it. Do not configure
 both in one profile.
 
+## Prefill/decode disaggregation
+
+Under P/D disaggregation (`disagg-profile-handler`), a session's KV stays on
+its decode pod between turns; a prefill pod holds it only while it prefills a
+turn. The plugin therefore manages decode pods only:
+
+- Only pods that run the decode stage enter the ledger: role `decode`,
+  `prefill-decode` or `encode-prefill-decode`, or no `llm-d.ai/role` label,
+  the same pods `decode-filter` keeps. Prefill, encode and encode-prefill pods
+  carry no sessions and add no capacity.
+- `PreRequest` binds the session to the primary profile's pick, which is the
+  decode pod under `disagg-profile-handler`. A primary profile that picks a
+  pod that does not decode leaves the session untracked.
+- Reference the plugin as a scorer in the decode profile only. The prefill
+  profile places each prefill with its own scorers, for example a
+  prefix-cache scorer and a load scorer.
+- A held turn waits in flow control, before either profile runs, so no
+  prefill is spent on a turn whose session does not fit its decode pod.
+- While a session stays admitted, its KV stays on its decode pod, so the
+  uncached part of each turn is small and `prefix-based-pd-decider` keeps the
+  prefill on the decode pod. A session that loses its room needs a full
+  prefill on a prefill pod and a full KV transfer on its next turn.
+
 ## Configuration
 
 See `deploy/config/thunderagent-config.yaml` for the full pipeline. All
@@ -121,6 +144,3 @@ dumps or logs.
   its room or the idle TTL drops it, so the working set gauge overestimates
   by recently ended sessions. An end-of-session marker is a candidate
   follow-up once clients can send one reliably.
-- Prefill/decode disaggregation is not supported: every pod the flow
-  controller reports enters one ledger, so a new session can be reserved
-  onto a prefill pod.
