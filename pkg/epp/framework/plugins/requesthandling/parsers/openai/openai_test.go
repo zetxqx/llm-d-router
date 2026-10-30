@@ -2036,6 +2036,10 @@ func BenchmarkOpenAIParser_ParseResponse_Streaming(b *testing.B) {
 			chunk: []byte(`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"}}]}`),
 		},
 		{
+			name:  "with_null_finish_reason",
+			chunk: []byte(`data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"hello"},"logprobs":null,"finish_reason":null}]}`),
+		},
+		{
 			name:  "with_usage",
 			chunk: []byte(`data: {"usage":{"prompt_tokens":7,"completion_tokens":10,"total_tokens":17}}`),
 		},
@@ -2293,5 +2297,140 @@ func TestOpenAIParser_ParseRequest_MaxOutputTokens(t *testing.T) {
 				t.Errorf("MaxOutputTokens mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestOpenAIParser_ParseResponse_Outcome(t *testing.T) {
+	parser := NewOpenAIParser()
+	jsonHeaders := map[string]string{reqcommon.HeaderContentType: "application/json"}
+	sseHeaders := map[string]string{reqcommon.HeaderContentType: request.MediaTypeEventStream}
+
+	tests := []struct {
+		name             string
+		body             string
+		headers          map[string]string
+		wantFinishReason string
+		wantHasToolCalls bool
+	}{
+		{
+			name:             "chat completion stop",
+			body:             `{"choices":[{"index":0,"message":{"role":"assistant","content":"hi","tool_calls":[]},"finish_reason":"stop"}],"usage":{"prompt_tokens":1}}`,
+			headers:          jsonHeaders,
+			wantFinishReason: "stop",
+		},
+		{
+			name:             "chat completion tool calls",
+			body:             `{"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,
+			headers:          jsonHeaders,
+			wantFinishReason: "tool_calls",
+			wantHasToolCalls: true,
+		},
+		{
+			name:             "chat completion tool calls with stop finish reason",
+			body:             `{"choices":[{"index":0,"message":{"tool_calls":[{"id":"call_1","type":"function"}]},"finish_reason":"stop"}]}`,
+			headers:          jsonHeaders,
+			wantFinishReason: "stop",
+			wantHasToolCalls: true,
+		},
+		{
+			name:             "completion length",
+			body:             `{"object":"text_completion","choices":[{"index":0,"text":"hi","finish_reason":"length"}]}`,
+			headers:          jsonHeaders,
+			wantFinishReason: "length",
+		},
+		{
+			name:    "responses api message output",
+			body:    `{"object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}`,
+			headers: jsonHeaders,
+		},
+		{
+			name:             "responses api function call output",
+			body:             `{"object":"response","output":[{"type":"reasoning"},{"type":"function_call","name":"f","arguments":"{}"}]}`,
+			headers:          jsonHeaders,
+			wantHasToolCalls: true,
+		},
+		{
+			name:             "malformed choices keep usage parse",
+			body:             `{"choices":[{"finish_reason":{"type":"stop"}}],"usage":{"prompt_tokens":1}}`,
+			headers:          jsonHeaders,
+			wantFinishReason: "",
+		},
+		{
+			name: "chat stream stop",
+			body: "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+				"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n",
+			headers:          sseHeaders,
+			wantFinishReason: "stop",
+		},
+		{
+			name: "chat stream tool calls",
+			body: "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"f\"}}]},\"finish_reason\":null}]}\n\n" +
+				"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
+			headers:          sseHeaders,
+			wantFinishReason: "tool_calls",
+			wantHasToolCalls: true,
+		},
+		{
+			name:             "chat stream tool call delta without finish reason",
+			body:             "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\": [{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\": null}]}\n",
+			headers:          sseHeaders,
+			wantHasToolCalls: true,
+		},
+		{
+			name:    "chat stream null and empty fields",
+			body:    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tool_calls\",\"tool_calls\":[]},\"finish_reason\": null}]}\n",
+			headers: sseHeaders,
+		},
+		{
+			name:    "chat stream key text inside content",
+			body:    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\\\"finish_reason\\\":\\\"stop\\\"\"},\"finish_reason\":null}]}\n",
+			headers: sseHeaders,
+		},
+		{
+			name:             "completion stream length",
+			body:             "data: {\"object\":\"text_completion\",\"choices\":[{\"index\":0,\"text\":\"\",\"finish_reason\":\"length\"}]}\n",
+			headers:          sseHeaders,
+			wantFinishReason: "length",
+		},
+		{
+			name: "responses stream function call",
+			body: "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"f\"}}\n\n" +
+				"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"name\":\"f\"}],\"usage\":{\"input_tokens\":1}}}\n",
+			headers:          sseHeaders,
+			wantHasToolCalls: true,
+		},
+		{
+			name:    "responses stream message",
+			body:    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"}],\"usage\":{\"input_tokens\":1}}}\n",
+			headers: sseHeaders,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseResponse(context.Background(), []byte(tt.body), tt.headers, true)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if got.FinishReason != tt.wantFinishReason {
+				t.Errorf("FinishReason = %q, want %q", got.FinishReason, tt.wantFinishReason)
+			}
+			if got.HasToolCalls != tt.wantHasToolCalls {
+				t.Errorf("HasToolCalls = %v, want %v", got.HasToolCalls, tt.wantHasToolCalls)
+			}
+		})
+	}
+}
+
+func TestOpenAIParser_ParseResponse_MalformedOutcomeKeepsUsage(t *testing.T) {
+	got, err := NewOpenAIParser().ParseResponse(context.Background(),
+		[]byte(`{"choices":"invalid","usage":{"prompt_tokens":3,"total_tokens":3}}`), map[string]string{}, true)
+	if err != nil {
+		t.Fatalf("ParseResponse() error = %v", err)
+	}
+	want := &fwkrh.ParsedResponse{Usage: &fwkrh.Usage{PromptTokens: 3, TotalTokens: 3}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("ParseResponse() mismatch (-want +got):\n%s", diff)
 	}
 }

@@ -2119,6 +2119,8 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 
 	// Final chunk (endOfStream=true) runs synchronously (drains queue first).
 	reqCtx.StreamedEvents = 7
+	reqCtx.FinishReason = "tool_calls"
+	reqCtx.HasToolCalls = true
 	director.HandleResponseBody(ctx, reqCtx, true)
 
 	ps1.mu.Lock()
@@ -2137,8 +2139,12 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		assert.Equal(t, 5+i, resp.StreamedEvents, "StreamedEvents should carry the accumulator value at dispatch time for chunk %d", i)
 		if i < 2 {
 			assert.False(t, resp.EndOfStream, "EndOfStream should be false for chunk %d", i)
+			assert.Empty(t, resp.FinishReason, "FinishReason should be empty for chunk %d", i)
+			assert.False(t, resp.HasToolCalls, "HasToolCalls should be false for chunk %d", i)
 		} else {
 			assert.True(t, resp.EndOfStream, "EndOfStream should be true for last chunk")
+			assert.Equal(t, "tool_calls", resp.FinishReason)
+			assert.True(t, resp.HasToolCalls)
 		}
 	}
 }

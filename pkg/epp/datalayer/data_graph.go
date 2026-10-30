@@ -221,6 +221,16 @@ func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
 	return DefaultLayer
 }
 
+// producerLayerExecutionOrder is the layer in which a producer's output becomes
+// available. RequestHeader processors run before flow control, so what they
+// publish is readable from every layer.
+func producerLayerExecutionOrder(p plugin.Plugin) int {
+	if _, ok := p.(fwkrc.RequestHeaderProcessor); ok {
+		return FlowControlLayer
+	}
+	return pluginToLayerExecutionOrder(p)
+}
+
 // buildDAG builds a dependency graph among data preparation plugins based on their
 // produced and consumed data keys.
 func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]plugin.ConsumerPlugin) (map[string][]string, error) {
@@ -253,7 +263,7 @@ func buildDAG(producers map[string]plugin.ProducerPlugin, consumers map[string]p
 						if producedType != nil && consumedType != nil && reflect.TypeOf(producedType) != reflect.TypeOf(consumedType) {
 							return nil, errors.New("data type mismatch between produced and consumed data for key: " + producedKey.String())
 						}
-						if pluginToLayerExecutionOrder(producer) > pluginToLayerExecutionOrder(consumer) {
+						if producerLayerExecutionOrder(producer) > pluginToLayerExecutionOrder(consumer) {
 							return nil, errors.New("invalid plugin layer execution order: producer " + pName + " needs to be executed before consumer " + cName)
 						}
 						// Consumer depends on producer, so add an edge from consumer to producer.

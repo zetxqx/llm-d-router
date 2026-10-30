@@ -26,22 +26,26 @@ func (a *ThunderAgent) Category() fwksched.ScorerCategory {
 	return fwksched.Affinity
 }
 
-// Score pins a session to the pod recorded in the ledger: that pod scores
-// 1.0 and every other candidate 0.0, so a session's turns keep hitting the
-// KV blocks its history already occupies.
+// Score pins a session to its pod: that pod scores 1.0 and every other
+// candidate 0.0, so a session's turns keep hitting the KV blocks its history
+// already occupies. The pod is the one Pick reserved for this turn, else the
+// session's BoundEndpoint, else the pod a paused session was paused on.
 func (a *ThunderAgent) Score(_ context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) map[fwksched.Endpoint]float64 {
 	id := sessionID(request)
 	if id == "" {
 		return nil
 	}
+	state, _ := a.sessionState(request, id)
 
-	m := a.mgr
-	m.mu.Lock()
-	target := ""
-	if s, ok := m.sessions[id]; ok && s.endpoint != nil {
-		target = s.endpoint.id
+	now := a.clock.Now()
+	a.mu.Lock()
+	target := state.BoundEndpoint
+	if l := a.local[id]; l.reservationLive(state, now) {
+		target = l.reservedEndpoint
+	} else if target == "" && l.pausedLive(state) {
+		target = l.pausedEndpoint
 	}
-	m.mu.Unlock()
+	a.mu.Unlock()
 	if target == "" {
 		return nil
 	}

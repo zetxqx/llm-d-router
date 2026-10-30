@@ -663,6 +663,7 @@ func TestAnthropicParser_ParseResponse_Streaming(t *testing.T) {
 					TotalTokens:      15,
 				},
 				StreamedEvents: 1,
+				FinishReason:   "end_turn",
 			},
 		},
 		{
@@ -1053,4 +1054,82 @@ func TestParseRequest_ServerToolResultObjectContent(t *testing.T) {
 	require.Len(t, blocks, 5)
 	assert.JSONEq(t, `{"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}`, string(blocks[1].Content))
 	assert.JSONEq(t, `{"type": "bash_code_execution_result", "stdout": "data.csv", "stderr": "", "return_code": 0, "content": []}`, string(blocks[3].Content))
+}
+
+func TestAnthropicParser_ParseResponse_Outcome(t *testing.T) {
+	parser := NewAnthropicParser()
+	sseHeaders := map[string]string{reqcommon.HeaderContentType: request.MediaTypeEventStream}
+
+	tests := []struct {
+		name             string
+		body             string
+		headers          map[string]string
+		wantFinishReason string
+		wantHasToolCalls bool
+	}{
+		{
+			name:             "message end_turn",
+			body:             `{"type":"message","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1}}`,
+			headers:          map[string]string{},
+			wantFinishReason: "end_turn",
+		},
+		{
+			name:             "message tool_use",
+			body:             `{"type":"message","content":[{"type":"text","text":"calling"},{"type":"tool_use","id":"toolu_1","name":"f","input":{}}],"stop_reason":"tool_use"}`,
+			headers:          map[string]string{},
+			wantFinishReason: "tool_use",
+			wantHasToolCalls: true,
+		},
+		{
+			name:             "message tool_use block with max_tokens stop",
+			body:             `{"type":"message","content":[{"type":"tool_use","id":"toolu_1","name":"f","input":{}}],"stop_reason":"max_tokens"}`,
+			headers:          map[string]string{},
+			wantFinishReason: "max_tokens",
+			wantHasToolCalls: true,
+		},
+		{
+			name:    "message null stop reason",
+			body:    `{"type":"message","content":[],"stop_reason":null}`,
+			headers: map[string]string{},
+		},
+		{
+			name: "stream end_turn",
+			body: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"stop_reason\":null,\"usage\":{\"input_tokens\":1}}}\n\n" +
+				"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"\\\"tool_use\\\"\"}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n",
+			headers:          sseHeaders,
+			wantFinishReason: "end_turn",
+		},
+		{
+			name: "stream tool_use",
+			body: "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"f\",\"input\":{}}}\n\n" +
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n" +
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n",
+			headers:          sseHeaders,
+			wantFinishReason: "tool_use",
+			wantHasToolCalls: true,
+		},
+		{
+			name:             "stream tool_use block start only",
+			body:             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"f\",\"input\":{}}}\n",
+			headers:          sseHeaders,
+			wantHasToolCalls: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parser.ParseResponse(context.Background(), []byte(tt.body), tt.headers, true)
+			if err != nil {
+				t.Fatalf("ParseResponse() error = %v", err)
+			}
+			if got.FinishReason != tt.wantFinishReason {
+				t.Errorf("FinishReason = %q, want %q", got.FinishReason, tt.wantFinishReason)
+			}
+			if got.HasToolCalls != tt.wantHasToolCalls {
+				t.Errorf("HasToolCalls = %v, want %v", got.HasToolCalls, tt.wantHasToolCalls)
+			}
+		})
+	}
 }

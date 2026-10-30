@@ -31,9 +31,8 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
-// A prefill pod is logged when it first enters the ledger, and every move of
-// an admitted session off its pod is logged at DEBUG.
-func TestWarnings(t *testing.T) {
+// Saturation never reports saturated, and logs each prefill pod once.
+func TestSaturationLogsPrefillOnce(t *testing.T) {
 	var lines []string
 	ctx := log.IntoContext(context.Background(), funcr.New(func(_, args string) {
 		lines = append(lines, args)
@@ -43,12 +42,10 @@ func TestWarnings(t *testing.T) {
 		ID:     types.NamespacedName{Namespace: "default", Name: "pod-p"},
 		Labels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
 	}, nil)
+	decode := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "default", Name: "pod-d"}}, nil)
 
-	for _, pod := range []string{"pod-a", "pod-b", "pod-c"} {
-		a.Saturation(ctx, []fwkdl.Endpoint{prefill})
-		require.NoError(t, a.PreRequest(ctx, newRequest("s1", 400), schedulingResultFor(schedEndpoint(pod, 0, 0))))
+	for range 3 {
+		require.Zero(t, a.Saturation(ctx, []fwkdl.Endpoint{prefill, decode}))
 	}
-	all := strings.Join(lines, "\n")
-	require.Equal(t, 1, strings.Count(all, "prefill/decode"))
-	require.Equal(t, 2, strings.Count(all, "moved off its pod"))
+	require.Equal(t, 1, strings.Count(strings.Join(lines, "\n"), "prefill/decode"))
 }

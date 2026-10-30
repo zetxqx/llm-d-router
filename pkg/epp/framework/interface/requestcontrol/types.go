@@ -70,6 +70,12 @@ type Response struct {
 	// was generated; requesthandling.ParsedResponse documents which parsers count and how the
 	// count deviates from the token count.
 	StreamedEvents int
+	// FinishReason is the last non-empty finish reason parsed from the response so far; see
+	// requesthandling.ParsedResponse.FinishReason. Final only on the EndOfStream call.
+	FinishReason string
+	// HasToolCalls reports that any part of the response parsed so far invoked a tool call.
+	// Final only on the EndOfStream call.
+	HasToolCalls bool
 	// TerminationCause labels how the stream ended.
 	TerminationCause TerminationCause
 	// DynamicMetadata is a map of metadata that can be passed to the Envoy. It is populated into the dynamic

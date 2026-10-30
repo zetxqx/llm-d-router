@@ -632,6 +632,8 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 		EndOfStream:    endOfStream,
 		Usage:          reqCtx.Usage,
 		StreamedEvents: reqCtx.StreamedEvents,
+		FinishReason:   reqCtx.FinishReason,
+		HasToolCalls:   reqCtx.HasToolCalls,
 	}
 
 	if endOfStream {

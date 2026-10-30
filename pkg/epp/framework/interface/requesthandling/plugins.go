@@ -128,4 +128,10 @@ type ParsedResponse struct {
 	// "data: " framing this parser already assumes (no-space prefixes, multi-line data fields,
 	// and keep-alive data lines skew it further).
 	StreamedEvents int
+	// FinishReason is the finish reason the model server reported in this parse, using the
+	// protocol's own vocabulary (for example "stop", "length", "tool_calls", "end_turn",
+	// "tool_use"). Empty when this parse carried no finish reason.
+	FinishReason string
+	// HasToolCalls reports that this parse observed the model invoking a tool call.
+	HasToolCalls bool
 }

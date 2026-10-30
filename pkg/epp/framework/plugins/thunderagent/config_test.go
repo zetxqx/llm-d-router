@@ -23,7 +23,7 @@ import (
 )
 
 // The defaults are valid; each gate parameter rejects values outside its
-// range, and the idle TTL must outlast the starvation deadline.
+// range.
 func TestConfigValidate(t *testing.T) {
 	require.NoError(t, defaultConfig().validate())
 
@@ -32,9 +32,8 @@ func TestConfigValidate(t *testing.T) {
 		"utilThreshold above one":       func(c *Config) { c.UtilThreshold = 1.1 },
 		"negative idleLeaseSeconds":     func(c *Config) { c.IdleLeaseSeconds = -1 },
 		"negative headWaitStarvationMs": func(c *Config) { c.HeadWaitStarvationMs = -1 },
-		"TTL not above starvation":      func(c *Config) { c.EvictionTTLSeconds, c.HeadWaitStarvationMs = 60, 60000 },
 		"capacityTokens zero":           func(c *Config) { c.CapacityTokens = 0 },
-		"evictionTtlSeconds zero":       func(c *Config) { c.EvictionTTLSeconds = 0 },
+		"evictionSweepSeconds zero":     func(c *Config) { c.EvictionSweepSeconds = 0 },
 	} {
 		cfg := defaultConfig()
 		mutate(&cfg)

@@ -94,6 +94,10 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 	}
 	if parsedResp != nil {
 		reqCtx.StreamedEvents += parsedResp.StreamedEvents
+		if parsedResp.FinishReason != "" {
+			reqCtx.FinishReason = parsedResp.FinishReason
+		}
+		reqCtx.HasToolCalls = reqCtx.HasToolCalls || parsedResp.HasToolCalls
 	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)

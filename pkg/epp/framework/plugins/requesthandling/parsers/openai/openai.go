@@ -242,18 +242,29 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 		return p.parseStreamResponse(body)
 	}
 
-	usage, err := extractUsage(body)
-	if err != nil {
+	var responseBody struct {
+		Usage map[string]any `json:"usage"`
+		responseOutcome
+	}
+	if err := json.Unmarshal(body, &responseBody); err != nil && !isOutcomeTypeError(err) {
 		return nil, err
 	}
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	finishReason, hasToolCalls := responseBody.outcome()
+	return &fwkrh.ParsedResponse{
+		Usage:        usageFromMap(responseBody.Usage),
+		FinishReason: finishReason,
+		HasToolCalls: hasToolCalls,
+	}, nil
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
 	usage := extractUsageStreaming(chunk)
+	finishReason, hasToolCalls := extractOutcomeStreaming(chunk)
 	return &fwkrh.ParsedResponse{
 		Usage:          usage,
 		StreamedEvents: countStreamEvents(chunk),
+		FinishReason:   finishReason,
+		HasToolCalls:   hasToolCalls,
 	}, nil
 }
 
@@ -559,15 +570,19 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if responseBody.Usage == nil {
-		return nil, nil //nolint:nilnil
+	return usageFromMap(responseBody.Usage), nil
+}
+
+func usageFromMap(raw map[string]any) *fwkrh.Usage {
+	if raw == nil {
+		return nil
 	}
 
 	usage := fwkrh.Usage{}
 
 	// Chat/Completions APIs use prompt_tokens. Responses/Conversations APIs use input_tokens.
 	for _, inputTokens := range []string{reqcommon.FieldPromptTokens, reqcommon.FieldInputTokens} {
-		if v, ok := responseBody.Usage[inputTokens]; ok && v != nil {
+		if v, ok := raw[inputTokens]; ok && v != nil {
 			usage.PromptTokens = toInt(v)
 			break
 		}
@@ -575,7 +590,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 
 	// Chat/Completions APIs use completion_tokens. Responses/Conversations APIs use output_tokens.
 	for _, outputTokens := range []string{reqcommon.FieldCompletionTokens, reqcommon.FieldOutputTokens} {
-		if v, ok := responseBody.Usage[outputTokens]; ok && v != nil {
+		if v, ok := raw[outputTokens]; ok && v != nil {
 			usage.CompletionTokens = toInt(v)
 			break
 		}
@@ -583,7 +598,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 
 	// Chat/Completions APIs use prompt_tokens_details. Responses/Conversations APIs use input_tokens_details.
 	for _, details := range []string{reqcommon.FieldPromptTokensDetails, reqcommon.FieldInputTokensDetails} {
-		if detailsMap, ok := responseBody.Usage[details].(map[string]any); ok {
+		if detailsMap, ok := raw[details].(map[string]any); ok {
 			if cachedTokens, ok := detailsMap[reqcommon.FieldCachedTokens]; ok {
 				usage.PromptTokenDetails = &fwkrh.PromptTokenDetails{
 					CachedTokens: toInt(cachedTokens),
@@ -593,11 +608,119 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	}
 
 	// total_tokens field name is consistent across all API types.
-	if v, ok := responseBody.Usage[reqcommon.FieldTotalTokens]; ok && v != nil {
+	if v, ok := raw[reqcommon.FieldTotalTokens]; ok && v != nil {
 		usage.TotalTokens = toInt(v)
 	}
 
-	return &usage, nil
+	return &usage
+}
+
+const (
+	fieldFinishReason    = "finish_reason"
+	fieldToolCalls       = "tool_calls"
+	finishReasonToolCall = "tool_calls"
+	// finishReasonFunctionCall is the finish reason of the deprecated Chat Completions functions API.
+	finishReasonFunctionCall = "function_call"
+	outputTypeFunctionCall   = "function_call"
+)
+
+type toolCallsHolder struct {
+	ToolCalls []json.RawMessage `json:"tool_calls"`
+}
+
+type outputItem struct {
+	Type string `json:"type"`
+}
+
+// responseOutcome decodes the fields that report how a response ended. Message is set on
+// non-streaming Chat Completions, Delta on streaming chunks, Output on non-streaming Responses
+// API bodies, and Response.Output on Responses API terminal stream events.
+type responseOutcome struct {
+	Choices []struct {
+		FinishReason string          `json:"finish_reason"`
+		Message      toolCallsHolder `json:"message"`
+		Delta        toolCallsHolder `json:"delta"`
+	} `json:"choices"`
+	Output   []outputItem `json:"output"`
+	Response struct {
+		Output []outputItem `json:"output"`
+	} `json:"response"`
+}
+
+func (o *responseOutcome) outcome() (finishReason string, hasToolCalls bool) {
+	for _, c := range o.Choices {
+		if c.FinishReason != "" {
+			finishReason = c.FinishReason
+		}
+		if c.FinishReason == finishReasonToolCall || c.FinishReason == finishReasonFunctionCall ||
+			len(c.Message.ToolCalls) > 0 || len(c.Delta.ToolCalls) > 0 {
+			hasToolCalls = true
+		}
+	}
+	for _, items := range [][]outputItem{o.Output, o.Response.Output} {
+		for _, item := range items {
+			if item.Type == outputTypeFunctionCall {
+				hasToolCalls = true
+			}
+		}
+	}
+	return finishReason, hasToolCalls
+}
+
+// isOutcomeTypeError reports whether err is a type mismatch outside the usage block. Such a
+// mismatch leaves the outcome partially decoded but must not discard the usage.
+func isOutcomeTypeError(err error) bool {
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr) && typeErr.Field != "usage"
+}
+
+// extractOutcomeStreaming returns the last non-empty finish reason in an SSE chunk and whether
+// any event in it invoked a tool call. Streaming servers emit "finish_reason":null on every
+// content delta, so only lines with a non-null finish reason or tool call field are decoded.
+func extractOutcomeStreaming(chunk []byte) (finishReason string, hasToolCalls bool) {
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
+		if !ok || isStreamTerminator(content) {
+			continue
+		}
+		needToolCalls := !hasToolCalls && (hasNonNullField(content, fieldToolCalls) ||
+			bytes.Contains(content, []byte(`"`+outputTypeFunctionCall+`"`)))
+		if !needToolCalls && !hasNonNullField(content, fieldFinishReason) {
+			continue
+		}
+		var event responseOutcome
+		if err := json.Unmarshal(content, &event); err != nil {
+			continue
+		}
+		reason, toolCalls := event.outcome()
+		if reason != "" {
+			finishReason = reason
+		}
+		hasToolCalls = hasToolCalls || toolCalls
+	}
+	return finishReason, hasToolCalls
+}
+
+// hasNonNullField reports whether content holds the JSON key with a value other than null or
+// an empty array. Matching the quoted key skips occurrences inside string values, where the
+// quotes are escaped.
+func hasNonNullField(content []byte, key string) bool {
+	quoted := []byte(`"` + key + `"`)
+	for {
+		i := bytes.Index(content, quoted)
+		if i < 0 {
+			return false
+		}
+		content = content[i+len(quoted):]
+		rest := bytes.TrimLeft(content, " \t")
+		if !bytes.HasPrefix(rest, []byte(":")) {
+			continue
+		}
+		rest = bytes.TrimLeft(rest[1:], " \t")
+		if !bytes.HasPrefix(rest, []byte("null")) && !bytes.HasPrefix(rest, []byte("[]")) {
+			return true
+		}
+	}
 }
 
 // Example message if "stream_options": {"include_usage": "true"} is included in the request:

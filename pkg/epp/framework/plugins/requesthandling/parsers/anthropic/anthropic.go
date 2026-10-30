@@ -156,22 +156,41 @@ func (p *AnthropicParser) ParseResponse(_ context.Context, body []byte, headers 
 		return p.parseStreamResponse(body)
 	}
 
-	usage, err := extractUsage(body)
-	if err != nil {
+	var responseBody map[string]any
+	if err := json.Unmarshal(body, &responseBody); err != nil {
 		return nil, err
 	}
-	return &fwkrh.ParsedResponse{Usage: usage}, nil
+	finishReason, hasToolCalls := extractOutcome(responseBody)
+	return &fwkrh.ParsedResponse{
+		Usage:        extractUsage(responseBody),
+		FinishReason: finishReason,
+		HasToolCalls: hasToolCalls,
+	}, nil
 }
 
-func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
-	var responseBody map[string]any
-	if err := json.Unmarshal(responseBytes, &responseBody); err != nil {
-		return nil, err
-	}
+const (
+	fieldStopReason   = "stop_reason"
+	stopReasonToolUse = "tool_use"
+	blockTypeToolUse  = "tool_use"
+)
 
+// extractOutcome reads the stop reason and tool use blocks of a non-streaming Messages response.
+func extractOutcome(responseBody map[string]any) (stopReason string, hasToolCalls bool) {
+	stopReason, _ = responseBody[fieldStopReason].(string)
+	hasToolCalls = stopReason == stopReasonToolUse
+	content, _ := responseBody["content"].([]any)
+	for _, item := range content {
+		if block, ok := item.(map[string]any); ok && block["type"] == blockTypeToolUse {
+			hasToolCalls = true
+		}
+	}
+	return stopReason, hasToolCalls
+}
+
+func extractUsage(responseBody map[string]any) *fwkrh.Usage {
 	usg, ok := responseBody["usage"].(map[string]any)
 	if !ok {
-		return nil, nil //nolint:nilnil
+		return nil
 	}
 
 	usage := fwkrh.Usage{}
@@ -179,7 +198,7 @@ func extractUsage(responseBytes []byte) (*fwkrh.Usage, error) {
 	usage.CompletionTokens = jsonInt(usg, "output_tokens")
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
-	return &usage, nil
+	return &usage
 }
 
 // applyInputTokens sums the Messages API input counts into usage.PromptTokens.
@@ -219,10 +238,53 @@ func jsonInt(m map[string]any, key string) int {
 //	data: {"type":"message_stop"}
 func (p *AnthropicParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
 	usage := extractUsageStreaming(chunk)
+	finishReason, hasToolCalls := extractOutcomeStreaming(chunk)
 	return &fwkrh.ParsedResponse{
 		Usage:          usage,
 		StreamedEvents: countStreamEvents(chunk),
+		FinishReason:   finishReason,
+		HasToolCalls:   hasToolCalls,
 	}, nil
+}
+
+// extractOutcomeStreaming reads the stop reason from message_delta events and tool use blocks
+// from content_block_start events. Matching the quoted keys skips text deltas, whose JSON
+// string values escape any quotes.
+func extractOutcomeStreaming(chunk []byte) (stopReason string, hasToolCalls bool) {
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
+		content, ok := bytes.CutPrefix(line, []byte(reqcommon.SSEDataPrefix))
+		if !ok || (!bytes.Contains(content, []byte(`"`+fieldStopReason+`"`)) && !bytes.Contains(content, []byte(`"`+blockTypeToolUse+`"`))) {
+			continue
+		}
+
+		var event struct {
+			Type  string `json:"type"`
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+			ContentBlock struct {
+				Type string `json:"type"`
+			} `json:"content_block"`
+		}
+		if err := json.Unmarshal(content, &event); err != nil {
+			continue
+		}
+
+		switch event.Type {
+		case "message_delta":
+			if event.Delta.StopReason != "" {
+				stopReason = event.Delta.StopReason
+			}
+			if event.Delta.StopReason == stopReasonToolUse {
+				hasToolCalls = true
+			}
+		case "content_block_start":
+			if event.ContentBlock.Type == blockTypeToolUse {
+				hasToolCalls = true
+			}
+		}
+	}
+	return stopReason, hasToolCalls
 }
 
 func countStreamEvents(chunk []byte) int {

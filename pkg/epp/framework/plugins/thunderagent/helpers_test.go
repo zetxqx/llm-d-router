@@ -23,15 +23,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
-	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/sessionstate"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
 )
+
+// t0 is a fixed base time so tests do not depend on the wall clock.
+var t0 = time.Unix(1_000_000, 0)
 
 // testConfig uses round numbers so tests can assert exact values: 1000-token
 // fallback capacity, byte estimates at 4 bytes per token, the default 30 s
@@ -42,25 +45,126 @@ func testConfig() Config {
 	return cfg
 }
 
+// newTestAgent returns an agent wired to its own session-state registry, both
+// reading one fake clock.
 func newTestAgent(cfg Config) *ThunderAgent {
-	return newThunderAgent("test", cfg)
+	a := newThunderAgent("test", cfg)
+	clk := clocktesting.NewFakeClock(t0)
+	a.clock = clk
+	a.registry.Store(sessionstate.NewSessionStateRegistry(clk))
+	return a
 }
 
-// schedEndpoint builds a scheduling endpoint; blockSize and numBlocks of 0
-// leave the endpoint without scraped capacity, selecting the fallback.
-func schedEndpoint(name string, blockSize, numBlocks int) fwksched.Endpoint {
+func registryOf(a *ThunderAgent) *sessionstate.SessionStateRegistry {
+	return a.registry.Load()
+}
+
+func clockOf(a *ThunderAgent) *clocktesting.FakeClock {
+	return a.clock.(*clocktesting.FakeClock)
+}
+
+func now(a *ThunderAgent) time.Time {
+	return a.clock.Now()
+}
+
+// advance moves the shared clock, so every session idles for d.
+func advance(a *ThunderAgent, d time.Duration) {
+	clockOf(a).Step(d)
+}
+
+func podID(pod string) string {
+	return "default/" + pod
+}
+
+// schedEndpoint builds a scheduling endpoint.
+func schedEndpoint(name string) fwksched.Endpoint {
 	nn := types.NamespacedName{Namespace: "default", Name: name}
-	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn},
-		&fwkdl.Metrics{CacheBlockSize: blockSize, CacheNumBlocks: numBlocks}, nil)
+	return fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn}, &fwkdl.Metrics{}, nil)
 }
 
-func schedulingResultFor(endpoint fwksched.Endpoint) *fwksched.SchedulingResult {
-	return &fwksched.SchedulingResult{
-		PrimaryProfileName: "default",
-		ProfileResults: map[string]*fwksched.ProfileRunResult{
-			"default": {TargetEndpoints: []fwksched.Endpoint{endpoint}},
-		},
+// turn is one dispatched turn and the tokens it charged.
+type turn struct {
+	id     string
+	tokens int64
+}
+
+// startTurn dispatches one turn without completing it, as the
+// session-state-producer's PreRequest does.
+func startTurn(a *ThunderAgent, id, pod string, sizeBytes int) turn {
+	tokens := max(estimateTokens(sizeBytes), 1)
+	registryOf(a).RecordDispatch(id, podID(pod), tokens)
+	return turn{id: id, tokens: tokens}
+}
+
+// finish completes a turn reporting totalTokens, as the
+// session-state-producer's ResponseBody does.
+func finish(a *ThunderAgent, tr turn, totalTokens int) {
+	registryOf(a).RecordResponse(tr.id, sessionstate.TurnOutcome{
+		NaturallyCompleted: true,
+		TotalTokens:        int64(totalTokens),
+		InFlightTokens:     tr.tokens,
+	})
+}
+
+// seed runs one 400-byte turn for the session on pod and completes it with
+// the given committed total.
+func seed(a *ThunderAgent, id, pod string, committed int) {
+	finish(a, startTurn(a, id, pod, 400), committed)
+}
+
+// primeFitView registers pods with unknown capacity, selecting the fallback,
+// as endpoint add events do.
+func primeFitView(a *ThunderAgent, pods ...string) {
+	for _, pod := range pods {
+		registryOf(a).UpsertEndpoint(podID(pod), nil)
 	}
+}
+
+func stateOf(t *testing.T, a *ThunderAgent, id string) sessionstate.SessionState {
+	t.Helper()
+	state, ok := registryOf(a).State(id)
+	require.True(t, ok, "session %q must be tracked", id)
+	return state
+}
+
+// endpointTokens returns a pod's working set under the accounting rule, or -1
+// if the pod is unknown.
+func endpointTokens(a *ThunderAgent, id string) float64 {
+	reg := registryOf(a)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	capacity, ok := a.capacityLocked(reg, id)
+	if !ok {
+		return -1
+	}
+	return a.loadLocked(reg, id, capacity, now(a), nil).occupancy
+}
+
+// pause marks a session paused on its bound pod, as a reclaim would.
+func pause(t *testing.T, a *ThunderAgent, id string) {
+	t.Helper()
+	state := stateOf(t, a, id)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	l := a.localLocked(id)
+	l.paused, l.pausedEndpoint, l.pausedAtTurns = true, state.BoundEndpoint, state.TurnsTaken
+}
+
+func isPaused(a *ThunderAgent, id string) bool {
+	state, _ := registryOf(a).State(id)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.local[id].pausedLive(state)
+}
+
+func reservedPod(a *ThunderAgent, id string) string {
+	state, _ := registryOf(a).State(id)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if l := a.local[id]; l.reservationLive(state, now(a)) {
+		return l.reservedEndpoint
+	}
+	return ""
 }
 
 // newRequest builds a request whose session id is published the way the
@@ -75,82 +179,6 @@ func newRequest(sessionID string, sizeBytes int) *fwksched.InferenceRequest {
 		req.PutAttribute(agentidentity.AgentIdentityKey, sessionID)
 	}
 	return req
-}
-
-func endOfStream(totalTokens, promptTokens int) *fwkrc.Response {
-	return &fwkrc.Response{
-		EndOfStream: true,
-		Usage:       requesthandling.Usage{TotalTokens: totalTokens, PromptTokens: promptTokens},
-	}
-}
-
-// startTurn dispatches one turn without completing it.
-func startTurn(t *testing.T, a *ThunderAgent, id string, endpoint fwksched.Endpoint, sizeBytes int) *fwksched.InferenceRequest {
-	t.Helper()
-	req := newRequest(id, sizeBytes)
-	require.NoError(t, a.PreRequest(context.Background(), req, schedulingResultFor(endpoint)))
-	return req
-}
-
-// runTurn dispatches and completes one turn reporting totalTokens.
-func runTurn(t *testing.T, a *ThunderAgent, id string, endpoint fwksched.Endpoint, sizeBytes, totalTokens int) {
-	t.Helper()
-	req := startTurn(t, a, id, endpoint, sizeBytes)
-	a.ResponseBody(context.Background(), req, endOfStream(totalTokens, totalTokens), nil)
-}
-
-func sessionOf(a *ThunderAgent, id string) (session, bool) {
-	a.mgr.mu.Lock()
-	defer a.mgr.mu.Unlock()
-	s, ok := a.mgr.sessions[id]
-	if !ok {
-		return session{}, false
-	}
-	return *s, true
-}
-
-func endpointTokens(a *ThunderAgent, id string) float64 {
-	a.mgr.mu.Lock()
-	defer a.mgr.mu.Unlock()
-	p, ok := a.mgr.endpoints[id]
-	if !ok {
-		return -1
-	}
-	return p.occupancy(time.Now())
-}
-
-// idleFor backdates a session's last response, so it looks idle for d.
-func idleFor(a *ThunderAgent, id string, d time.Duration) {
-	a.mgr.mu.Lock()
-	a.mgr.sessions[id].lastResponseAt = time.Now().Add(-d)
-	a.mgr.mu.Unlock()
-}
-
-// pause marks a session paused, as a reclaim would.
-func pause(a *ThunderAgent, id string) {
-	a.mgr.mu.Lock()
-	a.mgr.sessions[id].paused = true
-	a.mgr.mu.Unlock()
-}
-
-// dlEndpoint builds a datalayer endpoint without scraped capacity, selecting
-// the fallback.
-func dlEndpoint(name string) fwkdl.Endpoint {
-	nn := types.NamespacedName{Namespace: "default", Name: name}
-	return fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: nn}, &fwkdl.Metrics{})
-}
-
-// primeFitView refreshes the pod ledger the way the flow controller does
-// each dispatch cycle.
-func primeFitView(a *ThunderAgent, endpoints ...fwkdl.Endpoint) {
-	a.Saturation(context.Background(), endpoints)
-}
-
-func isPaused(a *ThunderAgent, id string) bool {
-	a.mgr.mu.Lock()
-	defer a.mgr.mu.Unlock()
-	s, ok := a.mgr.sessions[id]
-	return ok && s.paused
 }
 
 func makeQueue(id string, headEnqueue time.Time, headBytes uint64) *fwkfcmocks.MockFlowQueueAccessor {
@@ -183,15 +211,6 @@ func bandOf(queues ...fwkfc.FlowQueueAccessor) *fwkfcmocks.MockPriorityBandAcces
 			}
 		},
 	}
-}
-
-// seed runs one 400-byte turn for the session on pod and completes it with
-// the given committed total.
-func seed(t *testing.T, a *ThunderAgent, id string, pod string, committed int) {
-	t.Helper()
-	ep := schedEndpoint(pod, 0, 0)
-	req := startTurn(t, a, id, ep, 400)
-	a.ResponseBody(context.Background(), req, endOfStream(committed, 100), nil)
 }
 
 func pick(t *testing.T, a *ThunderAgent, queues ...fwkfc.FlowQueueAccessor) fwkfc.FlowQueueAccessor {

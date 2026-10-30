@@ -25,10 +25,12 @@ type Config struct {
 	// CapacityTokens is the per-endpoint KV cache capacity in tokens used when
 	// the endpoint does not report cache_config_info through the datalayer.
 	CapacityTokens int64 `json:"capacityTokens"`
-	// EvictionTTLSeconds is how long a session with no in-flight request and
-	// no activity is kept before its state is dropped.
-	EvictionTTLSeconds float64 `json:"evictionTtlSeconds"`
-	// EvictionSweepSeconds is how often idle sessions are swept.
+	// EvictionTTLSeconds is ignored. Idle session retention is the
+	// session-state-producer's evictionTtlSeconds. Accepted so existing
+	// configurations still load.
+	EvictionTTLSeconds float64 `json:"evictionTtlSeconds,omitempty"`
+	// EvictionSweepSeconds is how often expired pauses and reservations are
+	// dropped.
 	EvictionSweepSeconds float64 `json:"evictionSweepSeconds"`
 	// UtilThreshold is the fraction of a pod's KV capacity at which the pod
 	// is treated as full (1.0 = 100%).
@@ -48,7 +50,6 @@ type Config struct {
 func defaultConfig() Config {
 	return Config{
 		CapacityTokens:       4194304,
-		EvictionTTLSeconds:   3600,
 		EvictionSweepSeconds: 10,
 		UtilThreshold:        1.0,
 		IdleLeaseSeconds:     30,
@@ -59,9 +60,6 @@ func defaultConfig() Config {
 func (c Config) validate() error {
 	if c.CapacityTokens <= 0 {
 		return fmt.Errorf("capacityTokens must be > 0, got %d", c.CapacityTokens)
-	}
-	if c.EvictionTTLSeconds <= 0 {
-		return fmt.Errorf("evictionTtlSeconds must be > 0, got %v", c.EvictionTTLSeconds)
 	}
 	if c.EvictionSweepSeconds <= 0 {
 		return fmt.Errorf("evictionSweepSeconds must be > 0, got %v", c.EvictionSweepSeconds)
@@ -74,9 +72,6 @@ func (c Config) validate() error {
 	}
 	if c.HeadWaitStarvationMs < 0 {
 		return fmt.Errorf("headWaitStarvationMs must be >= 0, got %v", c.HeadWaitStarvationMs)
-	}
-	if c.EvictionTTLSeconds*1000 <= c.HeadWaitStarvationMs {
-		return fmt.Errorf("evictionTtlSeconds (%v s) must exceed headWaitStarvationMs (%v ms), or a held session is evicted mid-wait and re-enters as new", c.EvictionTTLSeconds, c.HeadWaitStarvationMs)
 	}
 	return nil
 }
