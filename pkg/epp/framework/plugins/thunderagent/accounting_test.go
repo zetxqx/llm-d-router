@@ -22,6 +22,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
+
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 )
 
 // A turn charges its byte estimate while in flight and settles to the
@@ -180,4 +185,21 @@ func TestSessionFollowsAgentIdentity(t *testing.T) {
 	require.NoError(t, a.PreRequest(context.Background(), fairnessOnly, schedulingResultFor(ep)))
 	_, ok = sessionOf(a, "tenant-a")
 	require.False(t, ok)
+}
+
+// A primary profile that picks a pod that does not decode leaves the session
+// untracked instead of binding it to that pod.
+func TestPreRequestSkipsPodThatDoesNotDecode(t *testing.T) {
+	a := newTestAgent(testConfig())
+	prefill := fwksched.NewEndpoint(&fwkdl.EndpointMetadata{
+		ID:     types.NamespacedName{Namespace: "default", Name: "pod-p"},
+		Labels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+	}, &fwkdl.Metrics{}, nil)
+
+	require.NoError(t, a.PreRequest(context.Background(), newRequest("s1", 400), schedulingResultFor(prefill)))
+	_, ok := sessionOf(a, "s1")
+	require.False(t, ok)
+	a.mgr.mu.Lock()
+	defer a.mgr.mu.Unlock()
+	require.Empty(t, a.mgr.endpoints)
 }
