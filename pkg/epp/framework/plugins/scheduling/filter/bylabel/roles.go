@@ -16,6 +16,8 @@ limitations under the License.
 
 package bylabel
 
+import "slices"
+
 const (
 	// RoleLabel name
 	RoleLabel = "llm-d.ai/role"
@@ -34,3 +36,14 @@ const (
 	// RoleEncodePrefillDecode set for workers that can handle encode+prefill+decode
 	RoleEncodePrefillDecode = "encode-prefill-decode"
 )
+
+// decodeRoles are the RoleLabel values of workers that run the decode stage.
+var decodeRoles = []string{RoleDecode, RolePrefillDecode, RoleEncodePrefillDecode}
+
+// RunsDecode reports whether an endpoint with these labels runs the decode stage:
+// it carries one of the decode roles, or no RoleLabel at all (an aggregated worker).
+// It selects the same endpoints as the decode filter.
+func RunsDecode(labels map[string]string) bool {
+	role, ok := labels[RoleLabel]
+	return !ok || slices.Contains(decodeRoles, role)
+}

@@ -93,7 +93,7 @@ func DecodeRoleFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Pl
 
 // NewDecodeRole creates and returns an instance of the Filter configured for decode role.
 func NewDecodeRole() *RoleFilter {
-	return newRoleFilter(DecodeRoleType, true, RoleDecode, RolePrefillDecode, RoleEncodePrefillDecode)
+	return newRoleFilter(DecodeRoleType, true, decodeRoles...)
 }
 
 // PrefillRoleFactory defines the factory function for the Prefill filter.
